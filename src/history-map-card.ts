@@ -370,13 +370,23 @@ class HistoryMapCard extends HTMLElement {
   // Entity colour map
   private _entityColors: Map<string, string> = new Map();
 
-  private _hasHistoryData = false;
+  private _initialViewSet = false;
   private _historyFetchedAt = 0;
   private _bounds: L.LatLngBoundsExpression | null = null;
 
   constructor() {
     super();
     this._shadow = this.attachShadow({ mode: 'open' });
+  }
+
+  connectedCallback(): void {
+    // When the element is (re-)attached to the DOM, ensure Leaflet
+    // recalculates the container size in case layout wasn't ready earlier.
+    if (this._map) {
+      requestAnimationFrame(() => {
+        this._map?.invalidateSize();
+      });
+    }
   }
 
   /* ----------------------------------------------------------------
@@ -423,6 +433,14 @@ class HistoryMapCard extends HTMLElement {
 
   private _buildCard(): void {
     if (!this._config) return;
+
+    // Destroy existing Leaflet instance before wiping the shadow DOM so
+    // Leaflet can clean up its event listeners properly.
+    if (this._map) {
+      this._map.remove();
+      this._map = null;
+    }
+    this._initialViewSet = false;
 
     const card = document.createElement('ha-card');
     card.setAttribute('elevation', '2');
@@ -545,6 +563,13 @@ class HistoryMapCard extends HTMLElement {
       maxZoom: 19,
     }).addTo(this._map);
 
+    // Leaflet reads the container dimensions at init time.  Inside a Shadow
+    // DOM the layout may not have been computed yet, so explicitly tell
+    // Leaflet to recalculate the size once the browser has done layout.
+    requestAnimationFrame(() => {
+      this._map?.invalidateSize();
+    });
+
     // Render current positions now that map is ready
     this._renderCurrentPositions();
   }
@@ -610,8 +635,11 @@ class HistoryMapCard extends HTMLElement {
       }
     });
 
-    // Fit map to current markers (only first time or when no history data yet)
-    if (validPoints.length > 0 && !this._hasHistoryData) {
+    // Fit map to current markers only the very first time (before history has
+    // been loaded and fitted).  Without this guard the map snaps back to the
+    // current position on every `set hass` call, which HA issues frequently.
+    if (validPoints.length > 0 && !this._initialViewSet) {
+      this._initialViewSet = true;
       if (validPoints.length === 1) {
         this._map.setView(validPoints[0], this._config.default_zoom ?? 14);
       } else {
@@ -696,7 +724,6 @@ class HistoryMapCard extends HTMLElement {
     // Sort all points by time
     allPoints.sort((a, b) => a.timestamp - b.timestamp);
     this._timelinePoints = allPoints;
-    this._hasHistoryData = true;
 
     // Fit bounds to history
     const latLngs = allPoints.map((p) => L.latLng(p.lat, p.lng));
