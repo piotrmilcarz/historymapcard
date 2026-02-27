@@ -43,16 +43,16 @@ interface HistoryMapCardConfig {
 }
 
 interface HistoryState {
-  entity_id: string;
+  entity_id?: string;
   state: string;
-  attributes: {
+  attributes?: {
     latitude?: number;
     longitude?: number;
     friendly_name?: string;
     [key: string]: unknown;
   };
   last_changed: string;
-  last_updated: string;
+  last_updated?: string;
 }
 
 interface TimelinePoint {
@@ -694,6 +694,7 @@ class HistoryMapCard extends HTMLElement {
     (data ?? []).forEach((entityHistory) => {
       if (!entityHistory || entityHistory.length === 0) return;
       const entityId = entityHistory[0].entity_id;
+      if (!entityId) return;
       const color = this._getEntityColor(entityId);
 
       const coords: L.LatLng[] = [];
@@ -703,7 +704,7 @@ class HistoryMapCard extends HTMLElement {
         const lng = state.attributes?.longitude;
         if (lat == null || lng == null) return;
 
-        const ts = new Date(state.last_updated).getTime();
+        const ts = new Date(state.last_updated ?? state.last_changed).getTime();
         allPoints.push({ timestamp: ts, entityId, lat, lng });
         coords.push(L.latLng(lat, lng));
       });
