@@ -664,9 +664,16 @@ class HistoryMapCard extends HTMLElement {
       .join(',');
 
     try {
+      // NOTE: HA's history API checks `minimal_response` and `no_attributes`
+      // by *presence* in the query string, not by their value.  Sending
+      // `minimal_response=false` or `no_attributes=false` therefore has the
+      // same effect as sending `minimal_response=true` / `no_attributes=true`,
+      // which strips `entity_id` from states and removes all attributes
+      // (including latitude/longitude).  Omitting these parameters lets HA
+      // return complete state objects with all fields we need.
       const path =
         `history/period/${startTime.toISOString()}` +
-        `?filter_entity_id=${entityIds}&minimal_response=false&no_attributes=false`;
+        `?filter_entity_id=${entityIds}`;
 
       const data: HistoryState[][] = await this._hass.callApi('GET', path);
 
@@ -680,7 +687,7 @@ class HistoryMapCard extends HTMLElement {
   }
 
   private _processHistoryData(
-    data: HistoryState[][],
+    data: HistoryState[][] | Record<string, HistoryState[]>,
     startTime: Date
   ): void {
     if (!this._map) return;
@@ -691,9 +698,23 @@ class HistoryMapCard extends HTMLElement {
 
     const allPoints: TimelinePoint[] = [];
 
-    (data ?? []).forEach((entityHistory) => {
+    // HA may return an Array<Array<HistoryState>> (legacy endpoint) or a
+    // Record<string, HistoryState[]> (newer recorder endpoint).  Normalise to
+    // array-of-arrays so the rest of the logic is uniform.
+    const histories: HistoryState[][] = Array.isArray(data)
+      ? data
+      : Object.values(data as Record<string, HistoryState[]>);
+
+    const entityConfigs = this._getEntityConfigs();
+
+    histories.forEach((entityHistory, index) => {
       if (!entityHistory || entityHistory.length === 0) return;
-      const entityId = entityHistory[0].entity_id;
+      // `entity_id` may be absent when HA omits it from minimal responses;
+      // search all states in the array first (more robust), then fall back to
+      // matching by position in the filter_entity_id list.
+      const entityId =
+        entityHistory.find((s) => s.entity_id)?.entity_id ??
+        entityConfigs[index]?.entity;
       if (!entityId) return;
       const color = this._getEntityColor(entityId);
 
