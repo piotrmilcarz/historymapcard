@@ -666,7 +666,7 @@ class HistoryMapCard extends HTMLElement {
     try {
       const path =
         `history/period/${startTime.toISOString()}` +
-        `?filter_entity_id=${entityIds}&minimal_response=true&no_attributes=false`;
+        `?filter_entity_id=${entityIds}&minimal_response=false&no_attributes=false`;
 
       const data: HistoryState[][] = await this._hass.callApi('GET', path);
 
