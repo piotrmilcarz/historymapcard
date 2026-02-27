@@ -671,9 +671,18 @@ class HistoryMapCard extends HTMLElement {
       // which strips `entity_id` from states and removes all attributes
       // (including latitude/longitude).  Omitting these parameters lets HA
       // return complete state objects with all fields we need.
+      //
+      // `significant_changes_only` defaults to 1 (true) and must be explicitly
+      // set to 0 to retrieve *all* state records, including those where only
+      // attributes changed (e.g. GPS coordinates for a person/device_tracker
+      // that stayed in the "not_home" state while physically moving around).
+      // Without this, HA returns only a handful of entries per entity (one per
+      // state-value transition), which explains why only ~4 points appear on
+      // the map instead of the full location trail.
       const path =
         `history/period/${startTime.toISOString()}` +
-        `?filter_entity_id=${entityIds}`;
+        `?filter_entity_id=${entityIds}` +
+        `&significant_changes_only=0`;
 
       const data: HistoryState[][] = await this._hass.callApi('GET', path);
 
