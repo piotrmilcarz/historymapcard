@@ -4,6 +4,12 @@ import L from 'leaflet';
  * Type definitions for Home Assistant integration
  * ------------------------------------------------------------------ */
 
+declare global {
+  interface Window {
+    customCards?: Array<Record<string, unknown>>;
+  }
+}
+
 interface HassEntity {
   entity_id: string;
   state: string;
@@ -394,6 +400,19 @@ class HistoryMapCard extends HTMLElement {
     }
   }
 
+  disconnectedCallback(): void {
+    // Clean up Leaflet map when the element is removed from the DOM to
+    // prevent stale map instances when the card is re-initialised.
+    if (this._map) {
+      this._map.remove();
+      this._map = null;
+    }
+    if (this._animationTimer !== null) {
+      clearTimeout(this._animationTimer);
+      this._animationTimer = null;
+    }
+  }
+
   /* ----------------------------------------------------------------
    * HA Lovelace API
    * -------------------------------------------------------------- */
@@ -445,6 +464,21 @@ class HistoryMapCard extends HTMLElement {
       this._map.remove();
       this._map = null;
     }
+
+    // Stop any running animation and clear stale layer references so the
+    // rebuilt map starts with a clean slate.
+    if (this._animationTimer !== null) {
+      clearTimeout(this._animationTimer);
+      this._animationTimer = null;
+      this._isPlaying = false;
+    }
+    this._currentMarkers.clear();
+    this._historyPathLines.clear();
+    this._animationMarkers.clear();
+    this._animationPaths.clear();
+    this._timelinePoints = [];
+    this._historyFetchedAt = 0;
+
     this._initialViewSet = false;
 
     const card = document.createElement('ha-card');
@@ -1062,6 +1096,8 @@ const EDITOR_CSS = `
   }
   .entity-row ha-entity-picker {
     min-width: 0;
+    display: block;
+    width: 100%;
   }
   .entity-name-input {
     width: 110px;
@@ -1279,6 +1315,7 @@ class HistoryMapCardEditor extends HTMLElement {
     picker.setAttribute('label', 'Entity');
     picker.setAttribute('value', ec.entity ?? '');
     picker.setAttribute('allow-custom-entity', '');
+    picker.setAttribute('include-domains', 'device_tracker,person');
     picker.addEventListener('value-changed', (e: Event) => {
       const newVal = (e as CustomEvent).detail?.value ?? '';
       const updated = [...allEntities];
@@ -1368,16 +1405,10 @@ customElements.define('history-map-card-editor', HistoryMapCardEditor);
 customElements.define('history-map-card', HistoryMapCard);
 
 // Announce to HA's custom card picker
-(window as Window & { customCards?: Array<Record<string, unknown>> })
-  .customCards = (
-    (window as Window & { customCards?: Array<Record<string, unknown>> })
-      .customCards ?? []
-  ).concat([
-    {
-      type: 'history-map-card',
-      name: 'History Map Card',
-      description:
-        'Map card with history timeline and animation playback',
-      preview: false,
-    },
-  ]);
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: 'history-map-card',
+  name: 'History Map Card',
+  description: 'Map card with history timeline and animation playback',
+  preview: false,
+});

@@ -14527,7 +14527,6 @@ function requireLeafletSrc () {
 var leafletSrcExports = requireLeafletSrc();
 var L$1 = /*@__PURE__*/getDefaultExportFromCjs(leafletSrcExports);
 
-var _a;
 /* ------------------------------------------------------------------
  * Default colours assigned per entity when not set in config
  * ------------------------------------------------------------------ */
@@ -14834,6 +14833,18 @@ class HistoryMapCard extends HTMLElement {
             });
         }
     }
+    disconnectedCallback() {
+        // Clean up Leaflet map when the element is removed from the DOM to
+        // prevent stale map instances when the card is re-initialised.
+        if (this._map) {
+            this._map.remove();
+            this._map = null;
+        }
+        if (this._animationTimer !== null) {
+            clearTimeout(this._animationTimer);
+            this._animationTimer = null;
+        }
+    }
     /* ----------------------------------------------------------------
      * HA Lovelace API
      * -------------------------------------------------------------- */
@@ -14874,6 +14885,19 @@ class HistoryMapCard extends HTMLElement {
             this._map.remove();
             this._map = null;
         }
+        // Stop any running animation and clear stale layer references so the
+        // rebuilt map starts with a clean slate.
+        if (this._animationTimer !== null) {
+            clearTimeout(this._animationTimer);
+            this._animationTimer = null;
+            this._isPlaying = false;
+        }
+        this._currentMarkers.clear();
+        this._historyPathLines.clear();
+        this._animationMarkers.clear();
+        this._animationPaths.clear();
+        this._timelinePoints = [];
+        this._historyFetchedAt = 0;
         this._initialViewSet = false;
         const card = document.createElement('ha-card');
         card.setAttribute('elevation', '2');
@@ -15419,6 +15443,8 @@ const EDITOR_CSS = `
   }
   .entity-row ha-entity-picker {
     min-width: 0;
+    display: block;
+    width: 100%;
   }
   .entity-name-input {
     width: 110px;
@@ -15613,6 +15639,7 @@ class HistoryMapCardEditor extends HTMLElement {
         picker.setAttribute('label', 'Entity');
         picker.setAttribute('value', (_a = ec.entity) !== null && _a !== void 0 ? _a : '');
         picker.setAttribute('allow-custom-entity', '');
+        picker.setAttribute('include-domains', 'device_tracker,person');
         picker.addEventListener('value-changed', (e) => {
             var _a, _b;
             const newVal = (_b = (_a = e.detail) === null || _a === void 0 ? void 0 : _a.value) !== null && _b !== void 0 ? _b : '';
@@ -15694,13 +15721,10 @@ class HistoryMapCardEditor extends HTMLElement {
 customElements.define('history-map-card-editor', HistoryMapCardEditor);
 customElements.define('history-map-card', HistoryMapCard);
 // Announce to HA's custom card picker
-window
-    .customCards = ((_a = window
-    .customCards) !== null && _a !== void 0 ? _a : []).concat([
-    {
-        type: 'history-map-card',
-        name: 'History Map Card',
-        description: 'Map card with history timeline and animation playback',
-        preview: false,
-    },
-]);
+window.customCards = window.customCards || [];
+window.customCards.push({
+    type: 'history-map-card',
+    name: 'History Map Card',
+    description: 'Map card with history timeline and animation playback',
+    preview: false,
+});
