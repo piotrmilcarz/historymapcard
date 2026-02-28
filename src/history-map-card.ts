@@ -219,6 +219,10 @@ svg.leaflet-zoom-animated{will-change:transform}
 const CARD_CSS = `
   :host {
     display: block;
+    /* Create a new stacking context so that Leaflet's high z-index panes
+       (up to 1000 for controls) are contained within the card element and
+       do not bleed over the HA card editor dialog that overlays the preview. */
+    isolation: isolate;
   }
   ha-card {
     overflow: hidden;
