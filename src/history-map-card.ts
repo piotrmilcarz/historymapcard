@@ -328,10 +328,15 @@ function formatDateTime(date: Date): string {
   );
 }
 
-function createDotIcon(color: string, size = 14): L.DivIcon {
+function createDotIcon(
+  color: string,
+  size = 14,
+  opacity = 1,
+  border = 'rgba(255,255,255,0.85)'
+): L.DivIcon {
   return L.divIcon({
     className: '',
-    html: `<div class="dot-marker" style="width:${size}px;height:${size}px;background:${color};border-radius:50%;border:2px solid rgba(255,255,255,0.85);box-shadow:0 1px 4px rgba(0,0,0,0.45);"></div>`,
+    html: `<div class="dot-marker" style="width:${size}px;height:${size}px;background:${color};border-radius:50%;border:2px solid ${border};box-shadow:0 1px 4px rgba(0,0,0,0.45);opacity:${opacity};"></div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     tooltipAnchor: [size / 2, 0],
@@ -621,10 +626,16 @@ class HistoryMapCard extends HTMLElement {
       const existing = this._currentMarkers.get(ec.entity);
       if (existing) {
         existing.setLatLng(latlng);
+        // Ensure current marker is fully visible when not animating
+        try {
+          existing.setOpacity(1);
+        } catch (e) {
+          /* ignore */
+        }
       } else {
         const marker = L.marker(latlng, {
-          icon: createDotIcon(color, 16),
-          zIndexOffset: 1000,
+          icon: createDotIcon(color, 20, 1),
+          zIndexOffset: 1200,
         })
           .bindTooltip(
             ec.name ?? state.attributes.friendly_name ?? ec.entity,
@@ -821,6 +832,15 @@ class HistoryMapCard extends HTMLElement {
     // Hide static history paths during animation so animation is clear
     this._historyPathLines.forEach((p) => p.setStyle({ opacity: 0.15 }));
 
+    // Dim the live/current markers slightly so animation markers stand out
+    this._currentMarkers.forEach((m) => {
+      try {
+        m.setOpacity(0.65);
+      } catch (e) {
+        /* ignore */
+      }
+    });
+
     // If we're at the end, restart from beginning
     if (this._animationIndex >= this._timelinePoints.length - 1) {
       this._animationIndex = 0;
@@ -839,6 +859,15 @@ class HistoryMapCard extends HTMLElement {
     }
     // Restore static path opacity
     this._historyPathLines.forEach((p) => p.setStyle({ opacity: 0.45 }));
+
+    // Restore live/current markers to full visibility
+    this._currentMarkers.forEach((m) => {
+      try {
+        m.setOpacity(1);
+      } catch (e) {
+        /* ignore */
+      }
+    });
   }
 
   private _scheduleNextFrame(): void {
@@ -914,7 +943,7 @@ class HistoryMapCard extends HTMLElement {
         (e) => e.entity === entityId
       );
       const marker = L.marker(lastCoord, {
-        icon: createDotIcon(color, 14),
+        icon: createDotIcon(color, 16),
         zIndexOffset: 900,
       })
         .bindTooltip(ec?.name ?? entityId, {
