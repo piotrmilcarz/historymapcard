@@ -15691,8 +15691,8 @@ class HistoryMapCardEditor extends HTMLElement {
 /* ------------------------------------------------------------------
  * Register the custom element
  * ------------------------------------------------------------------ */
-customElements.define('history-map-card', HistoryMapCard);
 customElements.define('history-map-card-editor', HistoryMapCardEditor);
+customElements.define('history-map-card', HistoryMapCard);
 // Announce to HA's custom card picker
 window
     .customCards = ((_a = window
