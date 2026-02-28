@@ -1,4 +1,4 @@
-# historymapcard
+# History Map Card
 
 A **Home Assistant custom Lovelace card** that extends the built-in _Map card_ with a history timeline and animated playback.
 
@@ -24,7 +24,7 @@ A **Home Assistant custom Lovelace card** that extends the built-in _Map card_ w
 │  ● My Phone  ● Another device                   │
 │  ┌──────────────────────────────────────────┐   │
 │  │ ▶  ─────────●────────────────────  14:32 │   │
-│  │    08:00              now                 │   │
+│  │    08:00              now                │   │
 │  └──────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────┘
 ```
@@ -51,6 +51,9 @@ entities:
   - entity: device_tracker.my_phone
     name: My Phone          # optional, overrides friendly name
     color: "#0288d1"         # optional hex colour
+  - entity: device_tracker.my_phone2
+    name: My Second Phone          # optional, overrides friendly name
+    color: "#d32f2f"         # optional hex colour
   - device_tracker.work_tablet  # simple string form also accepted
 hours_to_show: 24            # hours of history to load (default: 24)
 default_zoom: 14             # initial map zoom level (default: 14)
@@ -78,7 +81,7 @@ title: "Fleet Tracker"       # optional card title
 
 ### Prerequisites
 
-- Node.js ≥ 18
+- Node.js ≥ 16 (recommended: ≥ 18 for latest tooling)
 - npm
 
 ### Build
@@ -106,3 +109,17 @@ npm run dev
 ## License
 
 MIT
+
+## Node Requirements
+
+- This project builds with Node.js 16 and above, but some newer tooling (Rollup v4, terser plugins) require Node ≥18 or Node ≥20. If you see engine warnings like `EBADENGINE` or packages that require `node >=20`, upgrade your local Node.js before running `npm install` or `npm run build`.
+
+Recommended upgrade steps (using `nvm`):
+
+```bash
+nvm install 18
+nvm use 18
+npm install
+```
+
+If you cannot upgrade Node on your machine, the repository includes a minimal compatible setup (Rollup v3) and does not require the newer terser plugin; in that case `npm install` should complete without engine warnings.
