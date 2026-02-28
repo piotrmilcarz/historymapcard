@@ -1006,10 +1006,366 @@ class HistoryMapCard extends HTMLElement {
 }
 
 /* ------------------------------------------------------------------
+ * Visual configuration editor element
+ * ------------------------------------------------------------------ */
+
+const EDITOR_CSS = `
+  :host {
+    display: block;
+  }
+  .editor-root {
+    padding: 16px;
+  }
+  .section-title {
+    font-size: 0.85em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--secondary-text-color, #727272);
+    margin: 16px 0 8px;
+  }
+  .section-title:first-child {
+    margin-top: 0;
+  }
+  .form-row {
+    margin-bottom: 12px;
+  }
+  .form-row ha-textfield,
+  .form-row ha-entity-picker {
+    width: 100%;
+    display: block;
+  }
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--divider-color, #e0e0e0);
+  }
+  .switch-row:last-child {
+    border-bottom: none;
+  }
+  .switch-label {
+    font-size: 0.95em;
+    color: var(--primary-text-color, #212121);
+  }
+  .entity-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 8px;
+    border: 1px solid var(--divider-color, #e0e0e0);
+    border-radius: 6px;
+    background: var(--secondary-background-color, #f5f5f5);
+  }
+  .entity-row ha-entity-picker {
+    min-width: 0;
+  }
+  .entity-name-input {
+    width: 110px;
+  }
+  .color-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .color-input-wrap label {
+    font-size: 0.75em;
+    color: var(--secondary-text-color, #727272);
+    white-space: nowrap;
+  }
+  input[type="color"] {
+    width: 32px;
+    height: 32px;
+    padding: 2px;
+    border: 1px solid var(--divider-color, #ccc);
+    border-radius: 4px;
+    cursor: pointer;
+    background: none;
+  }
+  .remove-btn {
+    background: none;
+    border: none;
+    color: var(--error-color, #db4437);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+  }
+  .remove-btn:hover {
+    opacity: 1;
+    background: var(--error-color, #db4437);
+    color: #fff;
+  }
+  .add-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 1px dashed var(--primary-color, #03a9f4);
+    border-radius: 6px;
+    background: none;
+    color: var(--primary-color, #03a9f4);
+    cursor: pointer;
+    font-size: 0.9em;
+    width: 100%;
+    justify-content: center;
+    transition: background 0.15s;
+  }
+  .add-btn:hover {
+    background: var(--primary-color-light, rgba(3,169,244,0.08));
+  }
+`;
+
+class HistoryMapCardEditor extends HTMLElement {
+  private _config: HistoryMapCardConfig | null = null;
+  private _hass: HomeAssistant | null = null;
+  private _shadow: ShadowRoot;
+
+  constructor() {
+    super();
+    this._shadow = this.attachShadow({ mode: 'open' });
+  }
+
+  set hass(hass: HomeAssistant) {
+    this._hass = hass;
+    // Propagate hass to any ha-entity-picker elements already in the DOM
+    this._shadow.querySelectorAll('ha-entity-picker').forEach((el) => {
+      (el as HTMLElement & { hass: HomeAssistant }).hass = hass;
+    });
+  }
+
+  setConfig(config: HistoryMapCardConfig): void {
+    this._config = { ...config };
+    this._render();
+  }
+
+  /* ----------------------------------------------------------------
+   * Full re-render
+   * -------------------------------------------------------------- */
+
+  private _render(): void {
+    if (!this._config) return;
+
+    const config = this._config;
+    const entities: EntityConfig[] = (config.entities ?? []).map((e) =>
+      typeof e === 'string' ? { entity: e } : { ...e }
+    );
+
+    const style = document.createElement('style');
+    style.textContent = EDITOR_CSS;
+
+    const root = document.createElement('div');
+    root.className = 'editor-root';
+
+    /* ---- General section ---- */
+    const genTitle = document.createElement('div');
+    genTitle.className = 'section-title';
+    genTitle.textContent = 'General';
+    root.appendChild(genTitle);
+
+    // Title field
+    const titleRow = document.createElement('div');
+    titleRow.className = 'form-row';
+    const titleField = document.createElement('ha-textfield');
+    titleField.setAttribute('label', 'Title');
+    titleField.setAttribute('value', config.title ?? '');
+    titleField.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      this._updateConfig({ title: val || undefined });
+    });
+    titleRow.appendChild(titleField);
+    root.appendChild(titleRow);
+
+    // Hours to show
+    const hoursRow = document.createElement('div');
+    hoursRow.className = 'form-row';
+    const hoursField = document.createElement('ha-textfield');
+    hoursField.setAttribute('label', 'History hours to show');
+    hoursField.setAttribute('type', 'number');
+    hoursField.setAttribute('min', '1');
+    hoursField.setAttribute('max', '720');
+    hoursField.setAttribute('value', String(config.hours_to_show ?? 24));
+    hoursField.addEventListener('change', (e: Event) => {
+      const val = parseInt((e.target as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val > 0) this._updateConfig({ hours_to_show: val });
+    });
+    hoursRow.appendChild(hoursField);
+    root.appendChild(hoursRow);
+
+    // Default zoom
+    const zoomRow = document.createElement('div');
+    zoomRow.className = 'form-row';
+    const zoomField = document.createElement('ha-textfield');
+    zoomField.setAttribute('label', 'Default zoom level');
+    zoomField.setAttribute('type', 'number');
+    zoomField.setAttribute('min', '1');
+    zoomField.setAttribute('max', '20');
+    zoomField.setAttribute('value', String(config.default_zoom ?? 14));
+    zoomField.addEventListener('change', (e: Event) => {
+      const val = parseInt((e.target as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val >= 1 && val <= 20)
+        this._updateConfig({ default_zoom: val });
+    });
+    zoomRow.appendChild(zoomField);
+    root.appendChild(zoomRow);
+
+    // Dark mode toggle
+    const darkRow = document.createElement('div');
+    darkRow.className = 'switch-row';
+    const darkLabel = document.createElement('span');
+    darkLabel.className = 'switch-label';
+    darkLabel.textContent = 'Dark mode';
+    const darkSwitch = document.createElement('ha-switch');
+    if (config.dark_mode) darkSwitch.setAttribute('checked', '');
+    darkSwitch.addEventListener('change', (e: Event) => {
+      this._updateConfig({ dark_mode: (e.target as HTMLInputElement).checked });
+    });
+    darkRow.appendChild(darkLabel);
+    darkRow.appendChild(darkSwitch);
+    root.appendChild(darkRow);
+
+    /* ---- Entities section ---- */
+    const entTitle = document.createElement('div');
+    entTitle.className = 'section-title';
+    entTitle.textContent = 'Entities';
+    root.appendChild(entTitle);
+
+    entities.forEach((ec, idx) => {
+      const row = this._buildEntityRow(ec, idx, entities);
+      root.appendChild(row);
+    });
+
+    // Add entity button
+    const addBtn = document.createElement('button');
+    addBtn.className = 'add-btn';
+    addBtn.innerHTML =
+      `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>` +
+      `<span>Add entity</span>`;
+    addBtn.addEventListener('click', () => {
+      const newEntities = [...entities, { entity: '' }];
+      this._updateConfig({ entities: newEntities });
+    });
+    root.appendChild(addBtn);
+
+    this._shadow.innerHTML = '';
+    this._shadow.appendChild(style);
+    this._shadow.appendChild(root);
+
+    // Propagate hass to pickers
+    if (this._hass) {
+      this._shadow.querySelectorAll('ha-entity-picker').forEach((el) => {
+        (el as HTMLElement & { hass: HomeAssistant }).hass = this._hass!;
+      });
+    }
+  }
+
+  private _buildEntityRow(
+    ec: EntityConfig,
+    idx: number,
+    allEntities: EntityConfig[]
+  ): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'entity-row';
+
+    // Entity picker
+    const picker = document.createElement('ha-entity-picker');
+    picker.setAttribute('label', 'Entity');
+    picker.setAttribute('value', ec.entity ?? '');
+    picker.setAttribute('allow-custom-entity', '');
+    picker.addEventListener('value-changed', (e: Event) => {
+      const newVal = (e as CustomEvent).detail?.value ?? '';
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], entity: newVal };
+      this._updateConfig({ entities: updated });
+    });
+    if (this._hass) {
+      (picker as HTMLElement & { hass: HomeAssistant }).hass = this._hass;
+    }
+    row.appendChild(picker);
+
+    // Name input
+    const nameField = document.createElement('ha-textfield');
+    nameField.className = 'entity-name-input';
+    nameField.setAttribute('label', 'Name');
+    nameField.setAttribute('value', ec.name ?? '');
+    nameField.setAttribute('placeholder', 'Optional');
+    nameField.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], name: val || undefined };
+      this._updateConfig({ entities: updated });
+    });
+    row.appendChild(nameField);
+
+    // Color picker
+    const colorWrap = document.createElement('div');
+    colorWrap.className = 'color-input-wrap';
+    const colorLabel = document.createElement('label');
+    colorLabel.textContent = 'Color';
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.value = ec.color ?? ENTITY_COLORS[idx % ENTITY_COLORS.length];
+    colorInput.title = 'Entity color';
+    colorInput.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], color: val };
+      this._updateConfig({ entities: updated });
+    });
+    colorWrap.appendChild(colorLabel);
+    colorWrap.appendChild(colorInput);
+    row.appendChild(colorWrap);
+
+    // Remove button
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-btn';
+    removeBtn.title = 'Remove entity';
+    removeBtn.innerHTML =
+      `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">` +
+      `<path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>` +
+      `</svg>`;
+    removeBtn.addEventListener('click', () => {
+      if (allEntities.length <= 1) return; // keep at least one
+      const updated = allEntities.filter((_, i) => i !== idx);
+      this._updateConfig({ entities: updated });
+    });
+    row.appendChild(removeBtn);
+
+    return row;
+  }
+
+  /* ----------------------------------------------------------------
+   * Config helpers
+   * -------------------------------------------------------------- */
+
+  private _updateConfig(patch: Partial<HistoryMapCardConfig>): void {
+    if (!this._config) return;
+    this._config = { ...this._config, ...patch };
+    this.dispatchEvent(
+      new CustomEvent('config-changed', {
+        detail: { config: this._config },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    // Re-render to reflect updated state (entity list changes, etc.)
+    this._render();
+  }
+}
+
+/* ------------------------------------------------------------------
  * Register the custom element
  * ------------------------------------------------------------------ */
 
 customElements.define('history-map-card', HistoryMapCard);
+customElements.define('history-map-card-editor', HistoryMapCardEditor);
 
 // Announce to HA's custom card picker
 (window as Window & { customCards?: Array<Record<string, unknown>> })
