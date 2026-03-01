@@ -1101,10 +1101,33 @@ const EDITOR_CSS = `
     border-radius: 6px;
     background: var(--secondary-background-color, #f5f5f5);
   }
-  .entity-row ha-textfield:first-child {
+  .entity-row .entity-select-wrap {
     min-width: 0;
-    display: block;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .entity-select-label {
+    font-size: 0.72em;
+    color: var(--secondary-text-color, #727272);
+    padding-left: 2px;
+  }
+  .entity-select {
     width: 100%;
+    min-width: 0;
+    height: 36px;
+    padding: 0 8px;
+    border: 1px solid var(--divider-color, #ccc);
+    border-radius: 4px;
+    background: var(--card-background-color, #fff);
+    color: var(--primary-text-color, #212121);
+    font-size: 0.9em;
+    cursor: pointer;
+    box-sizing: border-box;
+  }
+  .entity-select:focus {
+    outline: none;
+    border-color: var(--primary-color, #03a9f4);
   }
   .entity-name-input {
     width: 110px;
@@ -1168,6 +1191,7 @@ const EDITOR_CSS = `
 
 class HistoryMapCardEditor extends HTMLElement {
   private _config: HistoryMapCardConfig | null = null;
+  private _hass: HomeAssistant | null = null;
   private _shadow: ShadowRoot;
 
   constructor() {
@@ -1175,8 +1199,10 @@ class HistoryMapCardEditor extends HTMLElement {
     this._shadow = this.attachShadow({ mode: 'open' });
   }
 
-  set hass(_hass: HomeAssistant) {
-    // hass is accepted for HA compatibility but not needed by this editor
+  set hass(hass: HomeAssistant) {
+    this._hass = hass;
+    // Re-render so entity dropdowns reflect the latest HA states
+    if (this._config) this._render();
   }
 
   setConfig(config: HistoryMapCardConfig): void {
@@ -1305,18 +1331,61 @@ class HistoryMapCardEditor extends HTMLElement {
     const row = document.createElement('div');
     row.className = 'entity-row';
 
-    // Entity ID input
-    const picker = document.createElement('ha-textfield');
-    picker.setAttribute('label', 'Entity ID');
-    picker.setAttribute('value', ec.entity ?? '');
-    picker.setAttribute('placeholder', 'e.g. device_tracker.my_phone');
-    picker.addEventListener('change', (e: Event) => {
-      const newVal = (e.target as HTMLInputElement).value;
+    // Entity select dropdown
+    const selectWrap = document.createElement('div');
+    selectWrap.className = 'entity-select-wrap';
+
+    const selectLabel = document.createElement('label');
+    selectLabel.className = 'entity-select-label';
+    selectLabel.textContent = 'Entity';
+
+    const select = document.createElement('select');
+    select.className = 'entity-select';
+
+    // Blank placeholder option
+    const blankOpt = document.createElement('option');
+    blankOpt.value = '';
+    blankOpt.textContent = '— Select entity —';
+    select.appendChild(blankOpt);
+
+    // Populate from live hass states (device_tracker + person)
+    if (this._hass) {
+      const trackable = Object.keys(this._hass.states)
+        .filter((id) => id.startsWith('device_tracker.') || id.startsWith('person.'))
+        .sort();
+      trackable.forEach((entityId) => {
+        const state = this._hass!.states[entityId];
+        const opt = document.createElement('option');
+        opt.value = entityId;
+        opt.textContent = state?.attributes?.friendly_name
+          ? `${state.attributes.friendly_name} (${entityId})`
+          : entityId;
+        select.appendChild(opt);
+      });
+    }
+
+    // If the currently configured entity isn't in the list, insert it right
+    // after the blank placeholder so it's always visible to the user.
+    const knownValues = Array.from(select.options).map((o) => o.value);
+    if (ec.entity && !knownValues.includes(ec.entity)) {
+      const opt = document.createElement('option');
+      opt.value = ec.entity;
+      opt.textContent = `${ec.entity} (not found)`;
+      // Insert after the blank placeholder (index 0)
+      select.insertBefore(opt, select.options[1] ?? null);
+    }
+
+    select.value = ec.entity ?? '';
+    select.addEventListener('change', (e: Event) => {
+      const newVal = (e.target as HTMLSelectElement).value;
       const updated = [...allEntities];
       updated[idx] = { ...updated[idx], entity: newVal };
       this._updateConfig({ entities: updated });
     });
-    row.appendChild(picker);
+
+    selectWrap.appendChild(selectLabel);
+    selectWrap.appendChild(select);
+    row.appendChild(selectWrap);
 
     // Name input
     const nameField = document.createElement('ha-textfield');
