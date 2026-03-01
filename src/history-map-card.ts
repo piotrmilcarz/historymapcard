@@ -1204,6 +1204,11 @@ class HistoryMapCardEditor extends HTMLElement {
   private _shadow: ShadowRoot;
   // Prevent duplicate load chains from connectedCallback + setConfig racing.
   private _pickerLoading = false;
+  // Cache the availability result once true so we don't probe on every call.
+  private _pickerAvailable = false;
+
+  private static readonly PICKER_LOAD_TIMEOUT_MS = 5000;
+  private static readonly PICKER_RENDER_CHECK_DELAY_MS = 200;
 
   constructor() {
     super();
@@ -1216,11 +1221,17 @@ class HistoryMapCardEditor extends HTMLElement {
   // available; we therefore also probe by checking the constructor of a
   // freshly-created element (an unregistered custom-element tag returns a
   // plain HTMLElement, whereas a registered one returns its own class).
+  // The positive result is cached to avoid repeated element creation.
   private _isPickerAvailable(): boolean {
-    if (customElements.get('ha-entity-picker')) return true;
+    if (this._pickerAvailable) return true;
+    if (customElements.get('ha-entity-picker')) {
+      this._pickerAvailable = true;
+      return true;
+    }
     const probe = document.createElement('ha-entity-picker');
     const available = probe.constructor !== HTMLElement;
     console.log('[HMC-editor] _isPickerAvailable → customElements.get:', !!customElements.get('ha-entity-picker'), '| constructor:', probe.constructor.name, '| available:', available);
+    if (available) this._pickerAvailable = true;
     return available;
   }
 
@@ -1279,10 +1290,11 @@ class HistoryMapCardEditor extends HTMLElement {
     const loadHelpers = (window as unknown as Record<string, unknown>)
       ['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
     console.log('[HMC-editor] _ensurePickerLoaded — loadCardHelpers available?', !!loadHelpers);
-    // Race whenDefined against a 5-second timeout so _render() always fires
+    // Race whenDefined against a timeout so _render() always fires
     // even when ha-entity-picker is registered only in a scoped registry and
     // the global whenDefined promise will never resolve.
-    const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5000));
+    const timeout = new Promise<void>((resolve) =>
+      setTimeout(resolve, HistoryMapCardEditor.PICKER_LOAD_TIMEOUT_MS));
     (loadHelpers ? loadHelpers() : Promise.resolve())
       .then(() => {
         const availableNow = this._isPickerAvailable();
@@ -1444,8 +1456,8 @@ class HistoryMapCardEditor extends HTMLElement {
     // Deferred check: verify the picker is a functioning LitElement once it
     // has been connected to the shadow DOM and had a chance to render.
     setTimeout(() => {
-      console.log('[HMC-editor] _buildEntityRow[' + idx + '] 200ms check — shadowRoot?', !!picker.shadowRoot, '| shadowRoot children:', picker.shadowRoot?.children.length ?? 'n/a', '| offsetHeight:', (picker as HTMLElement).offsetHeight);
-    }, 200);
+      console.log('[HMC-editor] _buildEntityRow[' + idx + '] deferred check — shadowRoot?', !!picker.shadowRoot, '| shadowRoot children:', picker.shadowRoot?.children.length ?? 'n/a', '| offsetHeight:', (picker as HTMLElement).offsetHeight);
+    }, HistoryMapCardEditor.PICKER_RENDER_CHECK_DELAY_MS);
     picker.addEventListener('value-changed', (e: Event) => {
       const newVal = (e as CustomEvent<{ value: string }>).detail.value;
       const updated = [...allEntities];
