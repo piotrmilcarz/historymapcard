@@ -221,7 +221,11 @@ const CARD_CSS = `
     display: block;
     /* Create a new stacking context so that Leaflet's high z-index panes
        (up to 1000 for controls) are contained within the card element and
-       do not bleed over the HA card editor dialog that overlays the preview. */
+       do not bleed over the HA card editor dialog that overlays the preview.
+       position + z-index are required so the stacking context has an explicit
+       level (0) that is below the HA dialog z-index. */
+    position: relative;
+    z-index: 0;
     isolation: isolate;
   }
   ha-card {
@@ -1068,8 +1072,7 @@ const EDITOR_CSS = `
   .form-row {
     margin-bottom: 12px;
   }
-  .form-row ha-textfield,
-  .form-row ha-entity-picker {
+  .form-row ha-textfield {
     width: 100%;
     display: block;
   }
@@ -1098,7 +1101,7 @@ const EDITOR_CSS = `
     border-radius: 6px;
     background: var(--secondary-background-color, #f5f5f5);
   }
-  .entity-row ha-entity-picker {
+  .entity-row ha-textfield:first-child {
     min-width: 0;
     display: block;
     width: 100%;
@@ -1165,7 +1168,6 @@ const EDITOR_CSS = `
 
 class HistoryMapCardEditor extends HTMLElement {
   private _config: HistoryMapCardConfig | null = null;
-  private _hass: HomeAssistant | null = null;
   private _shadow: ShadowRoot;
 
   constructor() {
@@ -1173,12 +1175,8 @@ class HistoryMapCardEditor extends HTMLElement {
     this._shadow = this.attachShadow({ mode: 'open' });
   }
 
-  set hass(hass: HomeAssistant) {
-    this._hass = hass;
-    // Propagate hass to any ha-entity-picker elements already in the DOM
-    this._shadow.querySelectorAll('ha-entity-picker').forEach((el) => {
-      (el as HTMLElement & { hass: HomeAssistant }).hass = hass;
-    });
+  set hass(_hass: HomeAssistant) {
+    // hass is accepted for HA compatibility but not needed by this editor
   }
 
   setConfig(config: HistoryMapCardConfig): void {
@@ -1297,13 +1295,6 @@ class HistoryMapCardEditor extends HTMLElement {
     this._shadow.innerHTML = '';
     this._shadow.appendChild(style);
     this._shadow.appendChild(root);
-
-    // Propagate hass to pickers
-    if (this._hass) {
-      this._shadow.querySelectorAll('ha-entity-picker').forEach((el) => {
-        (el as HTMLElement & { hass: HomeAssistant }).hass = this._hass!;
-      });
-    }
   }
 
   private _buildEntityRow(
@@ -1314,21 +1305,17 @@ class HistoryMapCardEditor extends HTMLElement {
     const row = document.createElement('div');
     row.className = 'entity-row';
 
-    // Entity picker
-    const picker = document.createElement('ha-entity-picker');
-    picker.setAttribute('label', 'Entity');
+    // Entity ID input
+    const picker = document.createElement('ha-textfield');
+    picker.setAttribute('label', 'Entity ID');
     picker.setAttribute('value', ec.entity ?? '');
-    picker.setAttribute('allow-custom-entity', '');
-    picker.setAttribute('include-domains', 'device_tracker,person');
-    picker.addEventListener('value-changed', (e: Event) => {
-      const newVal = (e as CustomEvent).detail?.value ?? '';
+    picker.setAttribute('placeholder', 'e.g. device_tracker.my_phone');
+    picker.addEventListener('change', (e: Event) => {
+      const newVal = (e.target as HTMLInputElement).value;
       const updated = [...allEntities];
       updated[idx] = { ...updated[idx], entity: newVal };
       this._updateConfig({ entities: updated });
     });
-    if (this._hass) {
-      (picker as HTMLElement & { hass: HomeAssistant }).hass = this._hass;
-    }
     row.appendChild(picker);
 
     // Name input
@@ -1405,10 +1392,8 @@ class HistoryMapCardEditor extends HTMLElement {
  * Register the custom element
  * ------------------------------------------------------------------ */
 
-customElements.define('history-map-card-editor', HistoryMapCardEditor);
-customElements.define('history-map-card', HistoryMapCard);
-
-// Announce to HA's custom card picker
+// Announce to HA's custom card picker before registering elements
+// so HA can resolve the card name immediately on element definition.
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'history-map-card',
@@ -1416,3 +1401,6 @@ window.customCards.push({
   description: 'Map card with history timeline and animation playback',
   preview: false,
 });
+
+customElements.define('history-map-card-editor', HistoryMapCardEditor);
+customElements.define('history-map-card', HistoryMapCard);
