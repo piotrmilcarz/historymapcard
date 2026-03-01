@@ -1202,18 +1202,35 @@ class HistoryMapCardEditor extends HTMLElement {
   private _config: HistoryMapCardConfig | null = null;
   private _hass: HomeAssistant | null = null;
   private _shadow: ShadowRoot;
+  // Prevent duplicate load chains from connectedCallback + setConfig racing.
+  private _pickerLoading = false;
 
   constructor() {
     super();
     this._shadow = this.attachShadow({ mode: 'open' });
   }
 
+  // Returns true when ha-entity-picker can be created as a proper custom
+  // element.  HA may use a scoped custom element registry so
+  // customElements.get() returns undefined even when the element is
+  // available; we therefore also probe by checking the constructor of a
+  // freshly-created element (an unregistered custom-element tag returns a
+  // plain HTMLElement, whereas a registered one returns its own class).
+  private _isPickerAvailable(): boolean {
+    if (customElements.get('ha-entity-picker')) return true;
+    const probe = document.createElement('ha-entity-picker');
+    const available = probe.constructor !== HTMLElement;
+    console.log('[HMC-editor] _isPickerAvailable → customElements.get:', !!customElements.get('ha-entity-picker'), '| constructor:', probe.constructor.name, '| available:', available);
+    return available;
+  }
+
   connectedCallback(): void {
-    // Retry loading ha-entity-picker in case the element was attached after
-    // setConfig was called (e.g. editor opened while HA is still booting).
-    console.log('[HMC-editor] connectedCallback — ha-entity-picker defined?', !!customElements.get('ha-entity-picker'), '| hass?', !!this._hass, '| config?', !!this._config);
+    console.log('[HMC-editor] connectedCallback — isPickerAvailable?', this._isPickerAvailable(), '| hass?', !!this._hass, '| config?', !!this._config);
     this._ensurePickerLoaded();
   }
+
+  // Prevent the hass-setter log from repeating after the first push.
+  private _hassPushedOnce = false;
 
   set hass(hass: HomeAssistant) {
     this._hass = hass;
@@ -1221,45 +1238,69 @@ class HistoryMapCardEditor extends HTMLElement {
     // A full re-render on every hass tick (≈1 s) would destroy open pickers
     // and cause aria-labelledby churn from freshly-created element IDs.
     const pickers = this._shadow.querySelectorAll('ha-entity-picker');
-    console.log('[HMC-editor] set hass — pushing to', pickers.length, 'picker(s). ha-entity-picker defined?', !!customElements.get('ha-entity-picker'));
+    if (pickers.length > 0 && !this._hassPushedOnce) {
+      this._hassPushedOnce = true;
+      console.log('[HMC-editor] set hass — first push to', pickers.length, 'picker(s). isPickerAvailable?', this._isPickerAvailable());
+    }
     pickers.forEach((el) => {
       (el as HTMLElement & { hass: HomeAssistant }).hass = hass;
     });
   }
 
   setConfig(config: HistoryMapCardConfig): void {
-    console.log('[HMC-editor] setConfig — ha-entity-picker defined?', !!customElements.get('ha-entity-picker'), '| loadCardHelpers?', !!((window as unknown as Record<string, unknown>)['loadCardHelpers']));
+    console.log('[HMC-editor] setConfig — isPickerAvailable?', this._isPickerAvailable(), '| loadCardHelpers?', !!((window as unknown as Record<string, unknown>)['loadCardHelpers']));
     this._config = { ...config };
-    this._render();
+    // Start the async load chain first; it will call _render() once the
+    // picker is ready (or after the timeout).  Also call _render() immediately
+    // so the editor shows up even before the picker is confirmed available.
     this._ensurePickerLoaded();
+    this._render();
   }
 
-  // ha-entity-picker is lazy-loaded by HA.  Call loadCardHelpers() to trigger
-  // the module import, then wait for the element to actually be registered
-  // before re-rendering.  The two steps are both necessary: loadCardHelpers()
-  // starts the dynamic import but its promise resolves before all custom
-  // elements in that module finish registering, so chaining whenDefined()
-  // ensures we re-render only once the picker is truly ready.
+  // ha-entity-picker is lazy-loaded by HA.  Some HA builds register it in a
+  // SCOPED custom element registry rather than the global one, which means
+  // customElements.get() returns undefined and customElements.whenDefined()
+  // never fires even though the element works fine.  We therefore:
+  //   1. Use an element-constructor probe (_isPickerAvailable) as the real gate.
+  //   2. Race whenDefined against a 5 s timeout so _render() always fires.
+  //   3. Deduplicate with _pickerLoading so only one chain runs at a time.
   private _ensurePickerLoaded(): void {
-    if (customElements.get('ha-entity-picker')) {
-      console.log('[HMC-editor] _ensurePickerLoaded — already defined, skipping');
+    if (this._isPickerAvailable()) {
+      console.log('[HMC-editor] _ensurePickerLoaded — picker already available, calling _render()');
+      this._render();
       return;
     }
-    console.log('[HMC-editor] _ensurePickerLoaded — not defined yet, starting load chain...');
+    if (this._pickerLoading) {
+      console.log('[HMC-editor] _ensurePickerLoaded — load already in progress, skipping duplicate');
+      return;
+    }
+    this._pickerLoading = true;
+    console.log('[HMC-editor] _ensurePickerLoaded — picker not available, starting load chain...');
     const loadHelpers = (window as unknown as Record<string, unknown>)
       ['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
     console.log('[HMC-editor] _ensurePickerLoaded — loadCardHelpers available?', !!loadHelpers);
+    // Race whenDefined against a 5-second timeout so _render() always fires
+    // even when ha-entity-picker is registered only in a scoped registry and
+    // the global whenDefined promise will never resolve.
+    const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5000));
     (loadHelpers ? loadHelpers() : Promise.resolve())
       .then(() => {
-        console.log('[HMC-editor] loadHelpers resolved — ha-entity-picker defined now?', !!customElements.get('ha-entity-picker'), '→ waiting for whenDefined...');
-        return customElements.whenDefined('ha-entity-picker');
+        const availableNow = this._isPickerAvailable();
+        console.log('[HMC-editor] loadHelpers resolved — available now?', availableNow, '→ racing whenDefined vs 5 s timeout...');
+        if (availableNow) return Promise.resolve();
+        return Promise.race([
+          customElements.whenDefined('ha-entity-picker'),
+          timeout,
+        ]);
       })
       .then(() => {
-        console.log('[HMC-editor] whenDefined resolved — ha-entity-picker is ready, calling _render()');
+        console.log('[HMC-editor] load chain settled — available?', this._isPickerAvailable(), '| calling _render()');
+        this._pickerLoading = false;
         this._render();
       })
       .catch((err) => {
         console.warn('[HMC-editor] _ensurePickerLoaded failed:', err);
+        this._pickerLoading = false;
       });
   }
 
@@ -1270,7 +1311,7 @@ class HistoryMapCardEditor extends HTMLElement {
   private _render(): void {
     if (!this._config) return;
 
-    console.log('[HMC-editor] _render() called — ha-entity-picker defined?', !!customElements.get('ha-entity-picker'), '| hass?', !!this._hass);
+    console.log('[HMC-editor] _render() called — isPickerAvailable?', this._isPickerAvailable(), '| hass?', !!this._hass);
 
     const config = this._config;
     const entities: EntityConfig[] = (config.entities ?? []).map((e) =>
@@ -1376,6 +1417,8 @@ class HistoryMapCardEditor extends HTMLElement {
     this._shadow.innerHTML = '';
     this._shadow.appendChild(style);
     this._shadow.appendChild(root);
+    // Reset the one-shot hass log so it fires again for new picker elements.
+    this._hassPushedOnce = false;
   }
 
   private _buildEntityRow(
@@ -1397,7 +1440,12 @@ class HistoryMapCardEditor extends HTMLElement {
     picker.value = ec.entity ?? '';
     picker.includeDomains = ['device_tracker', 'person'];
     if (this._hass) picker.hass = this._hass;
-    console.log('[HMC-editor] _buildEntityRow[' + idx + '] — picker tag upgraded?', picker.constructor !== HTMLElement, '| hass set?', !!this._hass, '| value:', picker.value);
+    console.log('[HMC-editor] _buildEntityRow[' + idx + '] — constructor:', picker.constructor.name, '| isUpgraded:', picker.constructor !== HTMLElement, '| hass set?', !!this._hass, '| value:', picker.value);
+    // Deferred check: verify the picker is a functioning LitElement once it
+    // has been connected to the shadow DOM and had a chance to render.
+    setTimeout(() => {
+      console.log('[HMC-editor] _buildEntityRow[' + idx + '] 200ms check — shadowRoot?', !!picker.shadowRoot, '| shadowRoot children:', picker.shadowRoot?.children.length ?? 'n/a', '| offsetHeight:', (picker as HTMLElement).offsetHeight);
+    }, 200);
     picker.addEventListener('value-changed', (e: Event) => {
       const newVal = (e as CustomEvent<{ value: string }>).detail.value;
       const updated = [...allEntities];
