@@ -392,6 +392,7 @@ class HistoryMapCard extends HTMLElement {
   private _initialViewSet = false;
   private _historyFetchedAt = 0;
   private _bounds: L.LatLngBoundsExpression | null = null;
+  private _resizeObserver: ResizeObserver | null = null;
 
   constructor() {
     super();
@@ -405,12 +406,18 @@ class HistoryMapCard extends HTMLElement {
       requestAnimationFrame(() => {
         this._map?.invalidateSize();
       });
+    } else if (this._mapContainer && this._hass && this._config) {
+      // Map was destroyed by disconnectedCallback; rebuild it now that the
+      // element is back in the DOM and hass is available.
+      this._initMap();
     }
   }
 
   disconnectedCallback(): void {
     // Clean up Leaflet map when the element is removed from the DOM to
     // prevent stale map instances when the card is re-initialised.
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
     if (this._map) {
       this._map.remove();
       this._map = null;
@@ -609,6 +616,15 @@ class HistoryMapCard extends HTMLElement {
       attribution: TILE_ATTRIBUTION,
       maxZoom: 19,
     }).addTo(this._map);
+
+    // Observe container size changes so Leaflet redraws when the dashboard
+    // switches between edit and view modes (the container may be hidden then
+    // shown, or the layout may change width, without firing lifecycle hooks).
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = new ResizeObserver(() => {
+      this._map?.invalidateSize();
+    });
+    this._resizeObserver.observe(this._mapContainer);
 
     // Leaflet reads the container dimensions at init time.  Inside a Shadow
     // DOM the layout may not have been computed yet, so explicitly tell
@@ -1180,6 +1196,12 @@ class HistoryMapCardEditor extends HTMLElement {
     this._shadow = this.attachShadow({ mode: 'open' });
   }
 
+  connectedCallback(): void {
+    // Retry loading ha-entity-picker in case the element was attached after
+    // setConfig was called (e.g. editor opened while HA is still booting).
+    this._ensurePickerLoaded();
+  }
+
   set hass(hass: HomeAssistant) {
     this._hass = hass;
     // Push updated hass to each entity picker without a full re-render.
@@ -1193,19 +1215,23 @@ class HistoryMapCardEditor extends HTMLElement {
   setConfig(config: HistoryMapCardConfig): void {
     this._config = { ...config };
     this._render();
-    // ha-entity-picker is lazy-loaded by HA. Use HA's documented
-    // loadCardHelpers() to actively trigger loading of all card UI elements
-    // (including ha-entity-picker), then re-render so pickers initialise
-    // correctly. Fall back to a passive whenDefined() wait on older HA builds
-    // where loadCardHelpers is not yet available.
-    if (!customElements.get('ha-entity-picker')) {
-      const loadHelpers: (() => Promise<unknown>) | undefined =
-        (window as unknown as Record<string, unknown>)['loadCardHelpers'] as
-        | (() => Promise<unknown>)
-        | undefined;
-      (loadHelpers ? loadHelpers() : customElements.whenDefined('ha-entity-picker'))
-        .then(() => this._render());
-    }
+    this._ensurePickerLoaded();
+  }
+
+  // ha-entity-picker is lazy-loaded by HA.  Call loadCardHelpers() to trigger
+  // the module import, then wait for the element to actually be registered
+  // before re-rendering.  The two steps are both necessary: loadCardHelpers()
+  // starts the dynamic import but its promise resolves before all custom
+  // elements in that module finish registering, so chaining whenDefined()
+  // ensures we re-render only once the picker is truly ready.
+  private _ensurePickerLoaded(): void {
+    if (customElements.get('ha-entity-picker')) return;
+    const loadHelpers = (window as unknown as Record<string, unknown>)
+      ['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
+    (loadHelpers ? loadHelpers() : Promise.resolve())
+      .then(() => customElements.whenDefined('ha-entity-picker'))
+      .then(() => this._render())
+      .catch(() => { /* ha-entity-picker failed to load; pickers remain plain elements */ });
   }
 
   /* ----------------------------------------------------------------
