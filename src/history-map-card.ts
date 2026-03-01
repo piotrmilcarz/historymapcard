@@ -456,10 +456,22 @@ class HistoryMapCard extends HTMLElement {
     this._hass = hass;
     if (!this._config) return;
 
-    // Lazy-initialise map (needs DOM to be ready)
+    // Lazy-initialise map.  The container must be laid out (non-zero width)
+    // before Leaflet is created, otherwise tiles and coordinate maths will be
+    // wrong.  When hass arrives before the element is in the layout tree we
+    // defer one animation frame so the browser can compute dimensions first.
     if (!this._map && this._mapContainer) {
-      console.log('[HMC_] set hass → _initMap (lazy init)');
-      this._initMap();
+      if (this._mapContainer.offsetWidth > 0) {
+        console.log('[HMC_] set hass → _initMap (lazy init)');
+        this._initMap();
+      } else {
+        requestAnimationFrame(() => {
+          if (!this._map && this._mapContainer && this._mapContainer.offsetWidth > 0) {
+            console.log('[HMC_] rAF set hass → _initMap (deferred lazy init)');
+            this._initMap();
+          }
+        });
+      }
     }
 
     // Refresh static current-position markers
@@ -1470,7 +1482,7 @@ class HistoryMapCardEditor extends HTMLElement {
     picker.value = ec.entity ?? '';
     picker.includeDomains = ['device_tracker', 'person'];
     if (this._hass) picker.hass = this._hass;
-    console.log('[HMC_-editor] _buildEntityRow[' + idx + '] — constructor:', picker.constructor.name, '| isUpgraded:', picker.constructor !== HTMLElement, '| hass set?', !!this._hass, '| value:', picker.value);
+    console.log('[HMC_-editor] _buildEntityRow[' + idx + '] — constructor:', picker.constructor.name, '| isUpgraded:', picker.constructor.name !== 'HTMLElement', '| hass set?', !!this._hass, '| value:', picker.value);
     // Deferred check: verify the picker is a functioning LitElement once it
     // has been connected to the shadow DOM and had a chance to render.
     setTimeout(() => {
