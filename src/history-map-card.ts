@@ -1097,7 +1097,7 @@ const EDITOR_CSS = `
     display: grid;
     grid-template-columns: 1fr auto auto auto;
     gap: 8px;
-    align-items: flex-end;
+    align-items: center;
     margin-bottom: 8px;
     padding: 8px;
     border: 1px solid var(--divider-color, #e0e0e0);
@@ -1107,9 +1107,11 @@ const EDITOR_CSS = `
   .entity-row ha-entity-picker {
     min-width: 0;
     display: block;
+    align-self: flex-end;
   }
   .entity-name-input {
     width: 110px;
+    align-self: flex-end;
   }
   .color-input-wrap {
     display: flex;
@@ -1191,6 +1193,12 @@ class HistoryMapCardEditor extends HTMLElement {
   setConfig(config: HistoryMapCardConfig): void {
     this._config = { ...config };
     this._render();
+    // ha-entity-picker is lazy-loaded by HA; if it isn't defined yet when the
+    // editor first opens, schedule a re-render for when it becomes available so
+    // pickers are properly initialised with the current hass reference.
+    if (!customElements.get('ha-entity-picker')) {
+      customElements.whenDefined('ha-entity-picker').then(() => this._render());
+    }
   }
 
   /* ----------------------------------------------------------------
