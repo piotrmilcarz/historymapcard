@@ -1193,11 +1193,18 @@ class HistoryMapCardEditor extends HTMLElement {
   setConfig(config: HistoryMapCardConfig): void {
     this._config = { ...config };
     this._render();
-    // ha-entity-picker is lazy-loaded by HA; if it isn't defined yet when the
-    // editor first opens, schedule a re-render for when it becomes available so
-    // pickers are properly initialised with the current hass reference.
+    // ha-entity-picker is lazy-loaded by HA. Use HA's documented
+    // loadCardHelpers() to actively trigger loading of all card UI elements
+    // (including ha-entity-picker), then re-render so pickers initialise
+    // correctly. Fall back to a passive whenDefined() wait on older HA builds
+    // where loadCardHelpers is not yet available.
     if (!customElements.get('ha-entity-picker')) {
-      customElements.whenDefined('ha-entity-picker').then(() => this._render());
+      const loadHelpers: (() => Promise<unknown>) | undefined =
+        (window as unknown as Record<string, unknown>)['loadCardHelpers'] as
+        | (() => Promise<unknown>)
+        | undefined;
+      (loadHelpers ? loadHelpers() : customElements.whenDefined('ha-entity-picker'))
+        .then(() => this._render());
     }
   }
 
