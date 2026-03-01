@@ -1097,7 +1097,7 @@ const EDITOR_CSS = `
     display: grid;
     grid-template-columns: 1fr auto auto auto;
     gap: 8px;
-    align-items: center;
+    align-items: flex-end;
     margin-bottom: 8px;
     padding: 8px;
     border: 1px solid var(--divider-color, #e0e0e0);
