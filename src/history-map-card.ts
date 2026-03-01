@@ -1208,6 +1208,7 @@ class HistoryMapCardEditor extends HTMLElement {
   private _pickerAvailable = false;
 
   private static readonly PICKER_LOAD_TIMEOUT_MS = 5000;
+  private static readonly PICKER_POLL_INTERVAL_MS = 100;
   private static readonly PICKER_RENDER_CHECK_DELAY_MS = 200;
 
   constructor() {
@@ -1218,9 +1219,12 @@ class HistoryMapCardEditor extends HTMLElement {
   // Returns true when ha-entity-picker can be created as a proper custom
   // element.  HA may use a scoped custom element registry so
   // customElements.get() returns undefined even when the element is
-  // available; we therefore also probe by checking the constructor of a
-  // freshly-created element (an unregistered custom-element tag returns a
-  // plain HTMLElement, whereas a registered one returns its own class).
+  // available; we therefore also probe by checking the constructor NAME of a
+  // freshly-created element.  An unregistered tag always yields an element
+  // whose constructor.name is "HTMLElement" regardless of which frame it came
+  // from — using the name avoids the cross-frame false-positive that occurs
+  // with identity comparison (probe.constructor !== HTMLElement) when our
+  // script runs in an iframe context with a different HTMLElement reference.
   // The positive result is cached to avoid repeated element creation.
   private _isPickerAvailable(): boolean {
     if (this._pickerAvailable) return true;
@@ -1229,7 +1233,8 @@ class HistoryMapCardEditor extends HTMLElement {
       return true;
     }
     const probe = document.createElement('ha-entity-picker');
-    const available = probe.constructor !== HTMLElement;
+    // Use .name to be safe across iframe/frame boundaries.
+    const available = probe.constructor.name !== 'HTMLElement';
     console.log('[HMC-editor] _isPickerAvailable → customElements.get:', !!customElements.get('ha-entity-picker'), '| constructor:', probe.constructor.name, '| available:', available);
     if (available) this._pickerAvailable = true;
     return available;
@@ -1271,10 +1276,11 @@ class HistoryMapCardEditor extends HTMLElement {
   // ha-entity-picker is lazy-loaded by HA.  Some HA builds register it in a
   // SCOPED custom element registry rather than the global one, which means
   // customElements.get() returns undefined and customElements.whenDefined()
-  // never fires even though the element works fine.  We therefore:
-  //   1. Use an element-constructor probe (_isPickerAvailable) as the real gate.
-  //   2. Race whenDefined against a 5 s timeout so _render() always fires.
-  //   3. Deduplicate with _pickerLoading so only one chain runs at a time.
+  // never fires even though the element eventually becomes creatable.  We
+  // therefore poll for the element constructor to change from "HTMLElement"
+  // to a real custom-element class after loadCardHelpers() is called.
+  // Polling is more reliable than whenDefined which silently hangs forever
+  // when the element is in a scoped registry.
   private _ensurePickerLoaded(): void {
     if (this._isPickerAvailable()) {
       console.log('[HMC-editor] _ensurePickerLoaded — picker already available, calling _render()');
@@ -1290,20 +1296,32 @@ class HistoryMapCardEditor extends HTMLElement {
     const loadHelpers = (window as unknown as Record<string, unknown>)
       ['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
     console.log('[HMC-editor] _ensurePickerLoaded — loadCardHelpers available?', !!loadHelpers);
-    // Race whenDefined against a timeout so _render() always fires
-    // even when ha-entity-picker is registered only in a scoped registry and
-    // the global whenDefined promise will never resolve.
-    const timeout = new Promise<void>((resolve) =>
-      setTimeout(resolve, HistoryMapCardEditor.PICKER_LOAD_TIMEOUT_MS));
     (loadHelpers ? loadHelpers() : Promise.resolve())
       .then(() => {
         const availableNow = this._isPickerAvailable();
-        console.log('[HMC-editor] loadHelpers resolved — available now?', availableNow, '→ racing whenDefined vs 5 s timeout...');
+        console.log('[HMC-editor] loadHelpers resolved — available now?', availableNow, '→ polling for registration...');
         if (availableNow) return Promise.resolve();
-        return Promise.race([
-          customElements.whenDefined('ha-entity-picker'),
-          timeout,
-        ]);
+        // Poll every PICKER_POLL_INTERVAL_MS until the element is available or
+        // the deadline passes.  This handles both global-registry registration
+        // (customElements.get becomes non-null) and scoped-registry cases
+        // (probe constructor name changes from "HTMLElement").
+        return new Promise<void>((resolve) => {
+          const deadline = Date.now() + HistoryMapCardEditor.PICKER_LOAD_TIMEOUT_MS;
+          const poll = () => {
+            // Check the cheap deadline guard first to avoid calling
+            // _isPickerAvailable unnecessarily after the timeout elapses.
+            if (Date.now() >= deadline || this._isPickerAvailable()) {
+              console.log('[HMC-editor] poll settled — available?', this._isPickerAvailable(), '| timed out?', Date.now() >= deadline);
+              resolve();
+            } else {
+              setTimeout(poll, HistoryMapCardEditor.PICKER_POLL_INTERVAL_MS);
+            }
+          };
+          // Start the first poll immediately — no initial delay — so that if
+          // the element registered synchronously during loadCardHelpers we
+          // pick it up in the same microtask tick.
+          poll();
+        });
       })
       .then(() => {
         console.log('[HMC-editor] load chain settled — available?', this._isPickerAvailable(), '| calling _render()');
