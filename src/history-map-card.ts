@@ -402,26 +402,26 @@ class HistoryMapCard extends HTMLElement {
   connectedCallback(): void {
     // When the element is (re-)attached to the DOM, ensure Leaflet
     // recalculates the container size in case layout wasn't ready earlier.
-    console.log('[HMC] card connectedCallback — map:', !!this._map, '| mapContainer:', !!this._mapContainer, '| hass:', !!this._hass, '| config:', !!this._config);
+    console.log('[HMC_] card connectedCallback — map:', !!this._map, '| mapContainer:', !!this._mapContainer, '| hass:', !!this._hass, '| config:', !!this._config);
     if (this._map) {
-      console.log('[HMC] card connectedCallback → invalidateSize (map exists)');
+      console.log('[HMC_] card connectedCallback → invalidateSize (map exists)');
       requestAnimationFrame(() => {
         this._map?.invalidateSize();
       });
     } else if (this._mapContainer && this._hass && this._config) {
       // Map was destroyed by disconnectedCallback; rebuild it now that the
       // element is back in the DOM and hass is available.
-      console.log('[HMC] card connectedCallback → _initMap (map was destroyed, rebuilding)');
+      console.log('[HMC_] card connectedCallback → _initMap (map was destroyed, rebuilding)');
       this._initMap();
     } else {
-      console.log('[HMC] card connectedCallback → nothing to do (missing:', !this._mapContainer ? 'mapContainer' : !this._hass ? 'hass' : 'config', ')');
+      console.log('[HMC_] card connectedCallback → nothing to do (missing:', !this._mapContainer ? 'mapContainer' : !this._hass ? 'hass' : 'config', ')');
     }
   }
 
   disconnectedCallback(): void {
     // Clean up Leaflet map when the element is removed from the DOM to
     // prevent stale map instances when the card is re-initialised.
-    console.log('[HMC] card disconnectedCallback — destroying map and observer');
+    console.log('[HMC_] card disconnectedCallback — destroying map and observer');
     this._resizeObserver?.disconnect();
     this._resizeObserver = null;
     if (this._map) {
@@ -458,7 +458,7 @@ class HistoryMapCard extends HTMLElement {
 
     // Lazy-initialise map (needs DOM to be ready)
     if (!this._map && this._mapContainer) {
-      console.log('[HMC] set hass → _initMap (lazy init)');
+      console.log('[HMC_] set hass → _initMap (lazy init)');
       this._initMap();
     }
 
@@ -614,7 +614,7 @@ class HistoryMapCard extends HTMLElement {
   private _initMap(): void {
     if (!this._mapContainer || !this._config) return;
 
-    console.log('[HMC] _initMap — creating Leaflet map. Container size:', this._mapContainer.offsetWidth, 'x', this._mapContainer.offsetHeight);
+    console.log('[HMC_] _initMap — creating Leaflet map. Container size:', this._mapContainer.offsetWidth, 'x', this._mapContainer.offsetHeight);
 
     this._map = L.map(this._mapContainer, {
       zoomControl: true,
@@ -632,7 +632,7 @@ class HistoryMapCard extends HTMLElement {
     this._resizeObserver?.disconnect();
     this._resizeObserver = new ResizeObserver((entries) => {
       const entry = entries[0];
-      console.log('[HMC] ResizeObserver fired — new size:', entry?.contentRect?.width, 'x', entry?.contentRect?.height, '| calling invalidateSize');
+      console.log('[HMC_] ResizeObserver fired — new size:', entry?.contentRect?.width, 'x', entry?.contentRect?.height, '| calling invalidateSize');
       this._map?.invalidateSize();
     });
     this._resizeObserver.observe(this._mapContainer);
@@ -641,7 +641,7 @@ class HistoryMapCard extends HTMLElement {
     // DOM the layout may not have been computed yet, so explicitly tell
     // Leaflet to recalculate the size once the browser has done layout.
     requestAnimationFrame(() => {
-      console.log('[HMC] rAF invalidateSize after _initMap. Container size now:', this._mapContainer?.offsetWidth, 'x', this._mapContainer?.offsetHeight);
+      console.log('[HMC_] rAF invalidateSize after _initMap. Container size now:', this._mapContainer?.offsetWidth, 'x', this._mapContainer?.offsetHeight);
       this._map?.invalidateSize();
     });
 
@@ -1235,13 +1235,13 @@ class HistoryMapCardEditor extends HTMLElement {
     const probe = document.createElement('ha-entity-picker');
     // Use .name to be safe across iframe/frame boundaries.
     const available = probe.constructor.name !== 'HTMLElement';
-    console.log('[HMC-editor] _isPickerAvailable → customElements.get:', !!customElements.get('ha-entity-picker'), '| constructor:', probe.constructor.name, '| available:', available);
+    console.log('[HMC_-editor] _isPickerAvailable → customElements.get:', !!customElements.get('ha-entity-picker'), '| constructor:', probe.constructor.name, '| available:', available);
     if (available) this._pickerAvailable = true;
     return available;
   }
 
   connectedCallback(): void {
-    console.log('[HMC-editor] connectedCallback — isPickerAvailable?', this._isPickerAvailable(), '| hass?', !!this._hass, '| config?', !!this._config);
+    console.log('[HMC_-editor] connectedCallback — isPickerAvailable?', this._isPickerAvailable(), '| hass?', !!this._hass, '| config?', !!this._config);
     this._ensurePickerLoaded();
   }
 
@@ -1256,7 +1256,7 @@ class HistoryMapCardEditor extends HTMLElement {
     const pickers = this._shadow.querySelectorAll('ha-entity-picker');
     if (pickers.length > 0 && !this._hassPushedOnce) {
       this._hassPushedOnce = true;
-      console.log('[HMC-editor] set hass — first push to', pickers.length, 'picker(s). isPickerAvailable?', this._isPickerAvailable());
+      console.log('[HMC_-editor] set hass — first push to', pickers.length, 'picker(s). isPickerAvailable?', this._isPickerAvailable());
     }
     pickers.forEach((el) => {
       (el as HTMLElement & { hass: HomeAssistant }).hass = hass;
@@ -1264,7 +1264,7 @@ class HistoryMapCardEditor extends HTMLElement {
   }
 
   setConfig(config: HistoryMapCardConfig): void {
-    console.log('[HMC-editor] setConfig — isPickerAvailable?', this._isPickerAvailable(), '| loadCardHelpers?', !!((window as unknown as Record<string, unknown>)['loadCardHelpers']));
+    console.log('[HMC_-editor] setConfig — isPickerAvailable?', this._isPickerAvailable(), '| loadCardHelpers?', !!((window as unknown as Record<string, unknown>)['loadCardHelpers']));
     this._config = { ...config };
     // Start the async load chain first; it will call _render() once the
     // picker is ready (or after the timeout).  Also call _render() immediately
@@ -1283,23 +1283,23 @@ class HistoryMapCardEditor extends HTMLElement {
   // when the element is in a scoped registry.
   private _ensurePickerLoaded(): void {
     if (this._isPickerAvailable()) {
-      console.log('[HMC-editor] _ensurePickerLoaded — picker already available, calling _render()');
+      console.log('[HMC_-editor] _ensurePickerLoaded — picker already available, calling _render()');
       this._render();
       return;
     }
     if (this._pickerLoading) {
-      console.log('[HMC-editor] _ensurePickerLoaded — load already in progress, skipping duplicate');
+      console.log('[HMC_-editor] _ensurePickerLoaded — load already in progress, skipping duplicate');
       return;
     }
     this._pickerLoading = true;
-    console.log('[HMC-editor] _ensurePickerLoaded — picker not available, starting load chain...');
+    console.log('[HMC_-editor] _ensurePickerLoaded — picker not available, starting load chain...');
     const loadHelpers = (window as unknown as Record<string, unknown>)
       ['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
-    console.log('[HMC-editor] _ensurePickerLoaded — loadCardHelpers available?', !!loadHelpers);
+    console.log('[HMC_-editor] _ensurePickerLoaded — loadCardHelpers available?', !!loadHelpers);
     (loadHelpers ? loadHelpers() : Promise.resolve())
       .then(() => {
         const availableNow = this._isPickerAvailable();
-        console.log('[HMC-editor] loadHelpers resolved — available now?', availableNow, '→ polling for registration...');
+        console.log('[HMC_-editor] loadHelpers resolved — available now?', availableNow, '→ polling for registration...');
         if (availableNow) return Promise.resolve();
         // Poll every PICKER_POLL_INTERVAL_MS until the element is available or
         // the deadline passes.  This handles both global-registry registration
@@ -1311,7 +1311,7 @@ class HistoryMapCardEditor extends HTMLElement {
             // Check the cheap deadline guard first to avoid calling
             // _isPickerAvailable unnecessarily after the timeout elapses.
             if (Date.now() >= deadline || this._isPickerAvailable()) {
-              console.log('[HMC-editor] poll settled — available?', this._isPickerAvailable(), '| timed out?', Date.now() >= deadline);
+              console.log('[HMC_-editor] poll settled — available?', this._isPickerAvailable(), '| timed out?', Date.now() >= deadline);
               resolve();
             } else {
               setTimeout(poll, HistoryMapCardEditor.PICKER_POLL_INTERVAL_MS);
@@ -1324,12 +1324,12 @@ class HistoryMapCardEditor extends HTMLElement {
         });
       })
       .then(() => {
-        console.log('[HMC-editor] load chain settled — available?', this._isPickerAvailable(), '| calling _render()');
+        console.log('[HMC_-editor] load chain settled — available?', this._isPickerAvailable(), '| calling _render()');
         this._pickerLoading = false;
         this._render();
       })
       .catch((err) => {
-        console.warn('[HMC-editor] _ensurePickerLoaded failed:', err);
+        console.warn('[HMC_-editor] _ensurePickerLoaded failed:', err);
         this._pickerLoading = false;
       });
   }
@@ -1341,7 +1341,7 @@ class HistoryMapCardEditor extends HTMLElement {
   private _render(): void {
     if (!this._config) return;
 
-    console.log('[HMC-editor] _render() called — isPickerAvailable?', this._isPickerAvailable(), '| hass?', !!this._hass);
+    console.log('[HMC_-editor] _render() called — isPickerAvailable?', this._isPickerAvailable(), '| hass?', !!this._hass);
 
     const config = this._config;
     const entities: EntityConfig[] = (config.entities ?? []).map((e) =>
@@ -1470,11 +1470,11 @@ class HistoryMapCardEditor extends HTMLElement {
     picker.value = ec.entity ?? '';
     picker.includeDomains = ['device_tracker', 'person'];
     if (this._hass) picker.hass = this._hass;
-    console.log('[HMC-editor] _buildEntityRow[' + idx + '] — constructor:', picker.constructor.name, '| isUpgraded:', picker.constructor !== HTMLElement, '| hass set?', !!this._hass, '| value:', picker.value);
+    console.log('[HMC_-editor] _buildEntityRow[' + idx + '] — constructor:', picker.constructor.name, '| isUpgraded:', picker.constructor !== HTMLElement, '| hass set?', !!this._hass, '| value:', picker.value);
     // Deferred check: verify the picker is a functioning LitElement once it
     // has been connected to the shadow DOM and had a chance to render.
     setTimeout(() => {
-      console.log('[HMC-editor] _buildEntityRow[' + idx + '] deferred check — shadowRoot?', !!picker.shadowRoot, '| shadowRoot children:', picker.shadowRoot?.children.length ?? 'n/a', '| offsetHeight:', (picker as HTMLElement).offsetHeight);
+      console.log('[HMC_-editor] _buildEntityRow[' + idx + '] deferred check — shadowRoot?', !!picker.shadowRoot, '| shadowRoot children:', picker.shadowRoot?.children.length ?? 'n/a', '| offsetHeight:', (picker as HTMLElement).offsetHeight);
     }, HistoryMapCardEditor.PICKER_RENDER_CHECK_DELAY_MS);
     picker.addEventListener('value-changed', (e: Event) => {
       const newVal = (e as CustomEvent<{ value: string }>).detail.value;
