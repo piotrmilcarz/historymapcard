@@ -4,6 +4,12 @@ import L from 'leaflet';
  * Type definitions for Home Assistant integration
  * ------------------------------------------------------------------ */
 
+declare global {
+  interface Window {
+    customCards?: Array<Record<string, unknown>>;
+  }
+}
+
 interface HassEntity {
   entity_id: string;
   state: string;
@@ -213,6 +219,14 @@ svg.leaflet-zoom-animated{will-change:transform}
 const CARD_CSS = `
   :host {
     display: block;
+    /* Create a new stacking context so that Leaflet's high z-index panes
+       (up to 1000 for controls) are contained within the card element and
+       do not bleed over the HA card editor dialog that overlays the preview.
+       position + z-index are required so the stacking context has an explicit
+       level (0) that is below the HA dialog z-index. */
+    position: relative;
+    z-index: 0;
+    isolation: isolate;
   }
   ha-card {
     overflow: hidden;
@@ -378,6 +392,7 @@ class HistoryMapCard extends HTMLElement {
   private _initialViewSet = false;
   private _historyFetchedAt = 0;
   private _bounds: L.LatLngBoundsExpression | null = null;
+  private _resizeObserver: ResizeObserver | null = null;
 
   constructor() {
     super();
@@ -387,10 +402,35 @@ class HistoryMapCard extends HTMLElement {
   connectedCallback(): void {
     // When the element is (re-)attached to the DOM, ensure Leaflet
     // recalculates the container size in case layout wasn't ready earlier.
+    console.log('[HMC_] card connectedCallback — map:', !!this._map, '| mapContainer:', !!this._mapContainer, '| hass:', !!this._hass, '| config:', !!this._config);
     if (this._map) {
+      console.log('[HMC_] card connectedCallback → invalidateSize (map exists)');
       requestAnimationFrame(() => {
         this._map?.invalidateSize();
       });
+    } else if (this._mapContainer && this._hass && this._config) {
+      // Map was destroyed by disconnectedCallback; rebuild it now that the
+      // element is back in the DOM and hass is available.
+      console.log('[HMC_] card connectedCallback → _initMap (map was destroyed, rebuilding)');
+      this._initMap();
+    } else {
+      console.log('[HMC_] card connectedCallback → nothing to do (missing:', !this._mapContainer ? 'mapContainer' : !this._hass ? 'hass' : 'config', ')');
+    }
+  }
+
+  disconnectedCallback(): void {
+    // Clean up Leaflet map when the element is removed from the DOM to
+    // prevent stale map instances when the card is re-initialised.
+    console.log('[HMC_] card disconnectedCallback — destroying map and observer');
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
+    if (this._map) {
+      this._map.remove();
+      this._map = null;
+    }
+    if (this._animationTimer !== null) {
+      clearTimeout(this._animationTimer);
+      this._animationTimer = null;
     }
   }
 
@@ -416,9 +456,22 @@ class HistoryMapCard extends HTMLElement {
     this._hass = hass;
     if (!this._config) return;
 
-    // Lazy-initialise map (needs DOM to be ready)
+    // Lazy-initialise map.  The container must be laid out (non-zero width)
+    // before Leaflet is created, otherwise tiles and coordinate maths will be
+    // wrong.  When hass arrives before the element is in the layout tree we
+    // defer one animation frame so the browser can compute dimensions first.
     if (!this._map && this._mapContainer) {
-      this._initMap();
+      if (this._mapContainer.offsetWidth > 0) {
+        console.log('[HMC_] set hass → _initMap (lazy init)');
+        this._initMap();
+      } else {
+        requestAnimationFrame(() => {
+          if (!this._map && this._mapContainer && this._mapContainer.offsetWidth > 0) {
+            console.log('[HMC_] rAF set hass → _initMap (deferred lazy init)');
+            this._initMap();
+          }
+        });
+      }
     }
 
     // Refresh static current-position markers
@@ -445,6 +498,21 @@ class HistoryMapCard extends HTMLElement {
       this._map.remove();
       this._map = null;
     }
+
+    // Stop any running animation and clear stale layer references so the
+    // rebuilt map starts with a clean slate.
+    if (this._animationTimer !== null) {
+      clearTimeout(this._animationTimer);
+      this._animationTimer = null;
+      this._isPlaying = false;
+    }
+    this._currentMarkers.clear();
+    this._historyPathLines.clear();
+    this._animationMarkers.clear();
+    this._animationPaths.clear();
+    this._timelinePoints = [];
+    this._historyFetchedAt = 0;
+
     this._initialViewSet = false;
 
     const card = document.createElement('ha-card');
@@ -558,6 +626,8 @@ class HistoryMapCard extends HTMLElement {
   private _initMap(): void {
     if (!this._mapContainer || !this._config) return;
 
+    console.log('[HMC_] _initMap — creating Leaflet map. Container size:', this._mapContainer.offsetWidth, 'x', this._mapContainer.offsetHeight);
+
     this._map = L.map(this._mapContainer, {
       zoomControl: true,
       attributionControl: true,
@@ -568,10 +638,22 @@ class HistoryMapCard extends HTMLElement {
       maxZoom: 19,
     }).addTo(this._map);
 
+    // Observe container size changes so Leaflet redraws when the dashboard
+    // switches between edit and view modes (the container may be hidden then
+    // shown, or the layout may change width, without firing lifecycle hooks).
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      console.log('[HMC_] ResizeObserver fired — new size:', entry?.contentRect?.width, 'x', entry?.contentRect?.height, '| calling invalidateSize');
+      this._map?.invalidateSize();
+    });
+    this._resizeObserver.observe(this._mapContainer);
+
     // Leaflet reads the container dimensions at init time.  Inside a Shadow
     // DOM the layout may not have been computed yet, so explicitly tell
     // Leaflet to recalculate the size once the browser has done layout.
     requestAnimationFrame(() => {
+      console.log('[HMC_] rAF invalidateSize after _initMap. Container size now:', this._mapContainer?.offsetWidth, 'x', this._mapContainer?.offsetHeight);
       this._map?.invalidateSize();
     });
 
@@ -672,7 +754,10 @@ class HistoryMapCard extends HTMLElement {
     const startTime = new Date(Date.now() - hoursToShow * 3600 * 1000);
     const entityIds = this._getEntityConfigs()
       .map((e) => e.entity)
+      .filter((id) => id.length > 0)
       .join(',');
+
+    if (!entityIds) return;
 
     try {
       // NOTE: HA's history API checks `minimal_response` and `no_attributes`
@@ -1006,22 +1091,494 @@ class HistoryMapCard extends HTMLElement {
 }
 
 /* ------------------------------------------------------------------
+ * Visual configuration editor element
+ * ------------------------------------------------------------------ */
+
+const EDITOR_CSS = `
+  :host {
+    display: block;
+  }
+  .editor-root {
+    padding: 16px;
+  }
+  .section-title {
+    font-size: 0.85em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--secondary-text-color, #727272);
+    margin: 16px 0 8px;
+  }
+  .section-title:first-child {
+    margin-top: 0;
+  }
+  .form-row {
+    margin-bottom: 12px;
+  }
+  .form-row ha-textfield {
+    width: 100%;
+    display: block;
+  }
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--divider-color, #e0e0e0);
+  }
+  .switch-row:last-child {
+    border-bottom: none;
+  }
+  .switch-label {
+    font-size: 0.95em;
+    color: var(--primary-text-color, #212121);
+  }
+  .entity-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 8px;
+    border: 1px solid var(--divider-color, #e0e0e0);
+    border-radius: 6px;
+    background: var(--secondary-background-color, #f5f5f5);
+  }
+  .entity-row ha-entity-picker {
+    min-width: 0;
+    display: block;
+    align-self: flex-end;
+  }
+  .entity-name-input {
+    width: 110px;
+    align-self: flex-end;
+  }
+  .color-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .color-input-wrap label {
+    font-size: 0.75em;
+    color: var(--secondary-text-color, #727272);
+    white-space: nowrap;
+  }
+  input[type="color"] {
+    width: 32px;
+    height: 32px;
+    padding: 2px;
+    border: 1px solid var(--divider-color, #ccc);
+    border-radius: 4px;
+    cursor: pointer;
+    background: none;
+  }
+  .remove-btn {
+    background: none;
+    border: none;
+    color: var(--error-color, #db4437);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+  }
+  .remove-btn:hover {
+    opacity: 1;
+    background: var(--error-color, #db4437);
+    color: #fff;
+  }
+  .add-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 1px dashed var(--primary-color, #03a9f4);
+    border-radius: 6px;
+    background: none;
+    color: var(--primary-color, #03a9f4);
+    cursor: pointer;
+    font-size: 0.9em;
+    width: 100%;
+    justify-content: center;
+    transition: background 0.15s;
+  }
+  .add-btn:hover {
+    background: var(--primary-color-light, rgba(3,169,244,0.08));
+  }
+`;
+
+class HistoryMapCardEditor extends HTMLElement {
+  private _config: HistoryMapCardConfig | null = null;
+  private _hass: HomeAssistant | null = null;
+  private _shadow: ShadowRoot;
+  // Prevent duplicate load chains from connectedCallback + setConfig racing.
+  private _pickerLoading = false;
+  // Cache the availability result once true so we don't probe on every call.
+  private _pickerAvailable = false;
+
+  private static readonly PICKER_LOAD_TIMEOUT_MS = 5000;
+  private static readonly PICKER_POLL_INTERVAL_MS = 100;
+  private static readonly PICKER_RENDER_CHECK_DELAY_MS = 200;
+
+  constructor() {
+    super();
+    this._shadow = this.attachShadow({ mode: 'open' });
+  }
+
+  // Returns true when ha-entity-picker can be created as a proper custom
+  // element.  HA may use a scoped custom element registry so
+  // customElements.get() returns undefined even when the element is
+  // available; we therefore also probe by checking the constructor NAME of a
+  // freshly-created element.  An unregistered tag always yields an element
+  // whose constructor.name is "HTMLElement" regardless of which frame it came
+  // from — using the name avoids the cross-frame false-positive that occurs
+  // with identity comparison (probe.constructor !== HTMLElement) when our
+  // script runs in an iframe context with a different HTMLElement reference.
+  // The positive result is cached to avoid repeated element creation.
+  private _isPickerAvailable(): boolean {
+    if (this._pickerAvailable) return true;
+    if (customElements.get('ha-entity-picker')) {
+      this._pickerAvailable = true;
+      return true;
+    }
+    const probe = document.createElement('ha-entity-picker');
+    // Use .name to be safe across iframe/frame boundaries.
+    const available = probe.constructor.name !== 'HTMLElement';
+    console.log('[HMC_-editor] _isPickerAvailable → customElements.get:', !!customElements.get('ha-entity-picker'), '| constructor:', probe.constructor.name, '| available:', available);
+    if (available) this._pickerAvailable = true;
+    return available;
+  }
+
+  connectedCallback(): void {
+    console.log('[HMC_-editor] connectedCallback — isPickerAvailable?', this._isPickerAvailable(), '| hass?', !!this._hass, '| config?', !!this._config);
+    this._ensurePickerLoaded();
+  }
+
+  // Prevent the hass-setter log from repeating after the first push.
+  private _hassPushedOnce = false;
+
+  set hass(hass: HomeAssistant) {
+    this._hass = hass;
+    // Push updated hass to each entity picker without a full re-render.
+    // A full re-render on every hass tick (≈1 s) would destroy open pickers
+    // and cause aria-labelledby churn from freshly-created element IDs.
+    const pickers = this._shadow.querySelectorAll('ha-entity-picker');
+    if (pickers.length > 0 && !this._hassPushedOnce) {
+      this._hassPushedOnce = true;
+      console.log('[HMC_-editor] set hass — first push to', pickers.length, 'picker(s). isPickerAvailable?', this._isPickerAvailable());
+    }
+    pickers.forEach((el) => {
+      (el as HTMLElement & { hass: HomeAssistant }).hass = hass;
+    });
+  }
+
+  setConfig(config: HistoryMapCardConfig): void {
+    console.log('[HMC_-editor] setConfig — isPickerAvailable?', this._isPickerAvailable(), '| loadCardHelpers?', !!((window as unknown as Record<string, unknown>)['loadCardHelpers']));
+    this._config = { ...config };
+    // Start the async load chain first; it will call _render() once the
+    // picker is ready (or after the timeout).  Also call _render() immediately
+    // so the editor shows up even before the picker is confirmed available.
+    this._ensurePickerLoaded();
+    this._render();
+  }
+
+  // ha-entity-picker is lazy-loaded by HA.  Some HA builds register it in a
+  // SCOPED custom element registry rather than the global one, which means
+  // customElements.get() returns undefined and customElements.whenDefined()
+  // never fires even though the element eventually becomes creatable.  We
+  // therefore poll for the element constructor to change from "HTMLElement"
+  // to a real custom-element class after loadCardHelpers() is called.
+  // Polling is more reliable than whenDefined which silently hangs forever
+  // when the element is in a scoped registry.
+  private _ensurePickerLoaded(): void {
+    if (this._isPickerAvailable()) {
+      console.log('[HMC_-editor] _ensurePickerLoaded — picker already available, calling _render()');
+      this._render();
+      return;
+    }
+    if (this._pickerLoading) {
+      console.log('[HMC_-editor] _ensurePickerLoaded — load already in progress, skipping duplicate');
+      return;
+    }
+    this._pickerLoading = true;
+    console.log('[HMC_-editor] _ensurePickerLoaded — picker not available, starting load chain...');
+    const loadHelpers = (window as unknown as Record<string, unknown>)
+      ['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
+    console.log('[HMC_-editor] _ensurePickerLoaded — loadCardHelpers available?', !!loadHelpers);
+    (loadHelpers ? loadHelpers() : Promise.resolve())
+      .then(() => {
+        const availableNow = this._isPickerAvailable();
+        console.log('[HMC_-editor] loadHelpers resolved — available now?', availableNow, '→ polling for registration...');
+        if (availableNow) return Promise.resolve();
+        // Poll every PICKER_POLL_INTERVAL_MS until the element is available or
+        // the deadline passes.  This handles both global-registry registration
+        // (customElements.get becomes non-null) and scoped-registry cases
+        // (probe constructor name changes from "HTMLElement").
+        return new Promise<void>((resolve) => {
+          const deadline = Date.now() + HistoryMapCardEditor.PICKER_LOAD_TIMEOUT_MS;
+          const poll = () => {
+            // Check the cheap deadline guard first to avoid calling
+            // _isPickerAvailable unnecessarily after the timeout elapses.
+            if (Date.now() >= deadline || this._isPickerAvailable()) {
+              console.log('[HMC_-editor] poll settled — available?', this._isPickerAvailable(), '| timed out?', Date.now() >= deadline);
+              resolve();
+            } else {
+              setTimeout(poll, HistoryMapCardEditor.PICKER_POLL_INTERVAL_MS);
+            }
+          };
+          // Start the first poll immediately — no initial delay — so that if
+          // the element registered synchronously during loadCardHelpers we
+          // pick it up in the same microtask tick.
+          poll();
+        });
+      })
+      .then(() => {
+        console.log('[HMC_-editor] load chain settled — available?', this._isPickerAvailable(), '| calling _render()');
+        this._pickerLoading = false;
+        this._render();
+      })
+      .catch((err) => {
+        console.warn('[HMC_-editor] _ensurePickerLoaded failed:', err);
+        this._pickerLoading = false;
+      });
+  }
+
+  /* ----------------------------------------------------------------
+   * Full re-render
+   * -------------------------------------------------------------- */
+
+  private _render(): void {
+    if (!this._config) return;
+
+    console.log('[HMC_-editor] _render() called — isPickerAvailable?', this._isPickerAvailable(), '| hass?', !!this._hass);
+
+    const config = this._config;
+    const entities: EntityConfig[] = (config.entities ?? []).map((e) =>
+      typeof e === 'string' ? { entity: e } : { ...e }
+    );
+
+    const style = document.createElement('style');
+    style.textContent = EDITOR_CSS;
+
+    const root = document.createElement('div');
+    root.className = 'editor-root';
+
+    /* ---- General section ---- */
+    const genTitle = document.createElement('div');
+    genTitle.className = 'section-title';
+    genTitle.textContent = 'General';
+    root.appendChild(genTitle);
+
+    // Title field
+    const titleRow = document.createElement('div');
+    titleRow.className = 'form-row';
+    const titleField = document.createElement('ha-textfield');
+    titleField.setAttribute('label', 'Title');
+    titleField.setAttribute('value', config.title ?? '');
+    titleField.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      this._updateConfig({ title: val || undefined });
+    });
+    titleRow.appendChild(titleField);
+    root.appendChild(titleRow);
+
+    // Hours to show
+    const hoursRow = document.createElement('div');
+    hoursRow.className = 'form-row';
+    const hoursField = document.createElement('ha-textfield');
+    hoursField.setAttribute('label', 'History hours to show');
+    hoursField.setAttribute('type', 'number');
+    hoursField.setAttribute('min', '1');
+    hoursField.setAttribute('max', '720');
+    hoursField.setAttribute('value', String(config.hours_to_show ?? 24));
+    hoursField.addEventListener('change', (e: Event) => {
+      const val = parseInt((e.target as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val > 0) this._updateConfig({ hours_to_show: val });
+    });
+    hoursRow.appendChild(hoursField);
+    root.appendChild(hoursRow);
+
+    // Default zoom
+    const zoomRow = document.createElement('div');
+    zoomRow.className = 'form-row';
+    const zoomField = document.createElement('ha-textfield');
+    zoomField.setAttribute('label', 'Default zoom level');
+    zoomField.setAttribute('type', 'number');
+    zoomField.setAttribute('min', '1');
+    zoomField.setAttribute('max', '20');
+    zoomField.setAttribute('value', String(config.default_zoom ?? 14));
+    zoomField.addEventListener('change', (e: Event) => {
+      const val = parseInt((e.target as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val >= 1 && val <= 20)
+        this._updateConfig({ default_zoom: val });
+    });
+    zoomRow.appendChild(zoomField);
+    root.appendChild(zoomRow);
+
+    // Dark mode toggle
+    const darkRow = document.createElement('div');
+    darkRow.className = 'switch-row';
+    const darkLabel = document.createElement('span');
+    darkLabel.className = 'switch-label';
+    darkLabel.textContent = 'Dark mode';
+    const darkSwitch = document.createElement('ha-switch');
+    if (config.dark_mode) darkSwitch.setAttribute('checked', '');
+    darkSwitch.addEventListener('change', (e: Event) => {
+      this._updateConfig({ dark_mode: (e.target as HTMLInputElement).checked });
+    });
+    darkRow.appendChild(darkLabel);
+    darkRow.appendChild(darkSwitch);
+    root.appendChild(darkRow);
+
+    /* ---- Entities section ---- */
+    const entTitle = document.createElement('div');
+    entTitle.className = 'section-title';
+    entTitle.textContent = 'Entities';
+    root.appendChild(entTitle);
+
+    entities.forEach((ec, idx) => {
+      const row = this._buildEntityRow(ec, idx, entities);
+      root.appendChild(row);
+    });
+
+    // Add entity button
+    const addBtn = document.createElement('button');
+    addBtn.className = 'add-btn';
+    addBtn.innerHTML =
+      `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>` +
+      `<span>Add entity</span>`;
+    addBtn.addEventListener('click', () => {
+      const newEntities = [...entities, { entity: '' }];
+      this._updateConfig({ entities: newEntities });
+    });
+    root.appendChild(addBtn);
+
+    this._shadow.innerHTML = '';
+    this._shadow.appendChild(style);
+    this._shadow.appendChild(root);
+    // Reset the one-shot hass log so it fires again for new picker elements.
+    this._hassPushedOnce = false;
+  }
+
+  private _buildEntityRow(
+    ec: EntityConfig,
+    idx: number,
+    allEntities: EntityConfig[]
+  ): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'entity-row';
+
+    // Entity picker (uses the same ha-entity-picker as HA's own Map card editor)
+    const picker = document.createElement('ha-entity-picker') as HTMLElement & {
+      hass?: HomeAssistant;
+      value?: string;
+      label?: string;
+      includeDomains?: string[];
+    };
+    picker.label = 'Entity';
+    picker.value = ec.entity ?? '';
+    picker.includeDomains = ['device_tracker', 'person'];
+    if (this._hass) picker.hass = this._hass;
+    console.log('[HMC_-editor] _buildEntityRow[' + idx + '] — constructor:', picker.constructor.name, '| isUpgraded:', picker.constructor.name !== 'HTMLElement', '| hass set?', !!this._hass, '| value:', picker.value);
+    // Deferred check: verify the picker is a functioning LitElement once it
+    // has been connected to the shadow DOM and had a chance to render.
+    setTimeout(() => {
+      console.log('[HMC_-editor] _buildEntityRow[' + idx + '] deferred check — shadowRoot?', !!picker.shadowRoot, '| shadowRoot children:', picker.shadowRoot?.children.length ?? 'n/a', '| offsetHeight:', (picker as HTMLElement).offsetHeight);
+    }, HistoryMapCardEditor.PICKER_RENDER_CHECK_DELAY_MS);
+    picker.addEventListener('value-changed', (e: Event) => {
+      const newVal = (e as CustomEvent<{ value: string }>).detail.value;
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], entity: newVal };
+      this._updateConfig({ entities: updated });
+    });
+    row.appendChild(picker);
+
+    // Name input
+    const nameField = document.createElement('ha-textfield');
+    nameField.className = 'entity-name-input';
+    nameField.setAttribute('label', 'Name');
+    nameField.setAttribute('value', ec.name ?? '');
+    nameField.setAttribute('placeholder', 'Optional');
+    nameField.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], name: val || undefined };
+      this._updateConfig({ entities: updated });
+    });
+    row.appendChild(nameField);
+
+    // Color picker
+    const colorWrap = document.createElement('div');
+    colorWrap.className = 'color-input-wrap';
+    const colorLabel = document.createElement('label');
+    colorLabel.textContent = 'Color';
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.value = ec.color ?? ENTITY_COLORS[idx % ENTITY_COLORS.length];
+    colorInput.title = 'Entity color';
+    colorInput.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], color: val };
+      this._updateConfig({ entities: updated });
+    });
+    colorWrap.appendChild(colorLabel);
+    colorWrap.appendChild(colorInput);
+    row.appendChild(colorWrap);
+
+    // Remove button
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-btn';
+    removeBtn.title = 'Remove entity';
+    removeBtn.innerHTML =
+      `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">` +
+      `<path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>` +
+      `</svg>`;
+    removeBtn.addEventListener('click', () => {
+      if (allEntities.length <= 1) return; // keep at least one
+      const updated = allEntities.filter((_, i) => i !== idx);
+      this._updateConfig({ entities: updated });
+    });
+    row.appendChild(removeBtn);
+
+    return row;
+  }
+
+  /* ----------------------------------------------------------------
+   * Config helpers
+   * -------------------------------------------------------------- */
+
+  private _updateConfig(patch: Partial<HistoryMapCardConfig>): void {
+    if (!this._config) return;
+    this._config = { ...this._config, ...patch };
+    this.dispatchEvent(
+      new CustomEvent('config-changed', {
+        detail: { config: this._config },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    // Re-render to reflect updated state (entity list changes, etc.)
+    this._render();
+  }
+}
+
+/* ------------------------------------------------------------------
  * Register the custom element
  * ------------------------------------------------------------------ */
 
-customElements.define('history-map-card', HistoryMapCard);
+// Announce to HA's custom card picker before registering elements
+// so HA can resolve the card name immediately on element definition.
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: 'history-map-card',
+  name: 'History Map Card',
+  description: 'Map card with history timeline and animation playback',
+  preview: false,
+});
 
-// Announce to HA's custom card picker
-(window as Window & { customCards?: Array<Record<string, unknown>> })
-  .customCards = (
-    (window as Window & { customCards?: Array<Record<string, unknown>> })
-      .customCards ?? []
-  ).concat([
-    {
-      type: 'history-map-card',
-      name: 'History Map Card',
-      description:
-        'Map card with history timeline and animation playback',
-      preview: false,
-    },
-  ]);
+customElements.define('history-map-card-editor', HistoryMapCardEditor);
+customElements.define('history-map-card', HistoryMapCard);
