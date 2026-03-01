@@ -714,7 +714,10 @@ class HistoryMapCard extends HTMLElement {
     const startTime = new Date(Date.now() - hoursToShow * 3600 * 1000);
     const entityIds = this._getEntityConfigs()
       .map((e) => e.entity)
+      .filter((id) => id.length > 0)
       .join(',');
+
+    if (!entityIds) return;
 
     try {
       // NOTE: HA's history API checks `minimal_response` and `no_attributes`
@@ -1101,33 +1104,9 @@ const EDITOR_CSS = `
     border-radius: 6px;
     background: var(--secondary-background-color, #f5f5f5);
   }
-  .entity-row .entity-select-wrap {
+  .entity-row ha-entity-picker {
     min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .entity-select-label {
-    font-size: 0.72em;
-    color: var(--secondary-text-color, #727272);
-    padding-left: 2px;
-  }
-  .entity-select {
-    width: 100%;
-    min-width: 0;
-    height: 36px;
-    padding: 0 8px;
-    border: 1px solid var(--divider-color, #ccc);
-    border-radius: 4px;
-    background: var(--card-background-color, #fff);
-    color: var(--primary-text-color, #212121);
-    font-size: 0.9em;
-    cursor: pointer;
-    box-sizing: border-box;
-  }
-  .entity-select:focus {
-    outline: none;
-    border-color: var(--primary-color, #03a9f4);
+    display: block;
   }
   .entity-name-input {
     width: 110px;
@@ -1201,8 +1180,12 @@ class HistoryMapCardEditor extends HTMLElement {
 
   set hass(hass: HomeAssistant) {
     this._hass = hass;
-    // Re-render so entity dropdowns reflect the latest HA states
-    if (this._config) this._render();
+    // Push updated hass to each entity picker without a full re-render.
+    // A full re-render on every hass tick (≈1 s) would destroy open pickers
+    // and cause aria-labelledby churn from freshly-created element IDs.
+    this._shadow.querySelectorAll('ha-entity-picker').forEach((el) => {
+      (el as HTMLElement & { hass: HomeAssistant }).hass = hass;
+    });
   }
 
   setConfig(config: HistoryMapCardConfig): void {
@@ -1331,61 +1314,24 @@ class HistoryMapCardEditor extends HTMLElement {
     const row = document.createElement('div');
     row.className = 'entity-row';
 
-    // Entity select dropdown
-    const selectWrap = document.createElement('div');
-    selectWrap.className = 'entity-select-wrap';
-
-    const selectLabel = document.createElement('label');
-    selectLabel.className = 'entity-select-label';
-    selectLabel.textContent = 'Entity';
-
-    const select = document.createElement('select');
-    select.className = 'entity-select';
-
-    // Blank placeholder option
-    const blankOpt = document.createElement('option');
-    blankOpt.value = '';
-    blankOpt.textContent = '— Select entity —';
-    select.appendChild(blankOpt);
-
-    // Populate from live hass states (device_tracker + person)
-    if (this._hass) {
-      const trackable = Object.keys(this._hass.states)
-        .filter((id) => id.startsWith('device_tracker.') || id.startsWith('person.'))
-        .sort();
-      trackable.forEach((entityId) => {
-        const state = this._hass!.states[entityId];
-        const opt = document.createElement('option');
-        opt.value = entityId;
-        opt.textContent = state?.attributes?.friendly_name
-          ? `${state.attributes.friendly_name} (${entityId})`
-          : entityId;
-        select.appendChild(opt);
-      });
-    }
-
-    // If the currently configured entity isn't in the list, insert it right
-    // after the blank placeholder so it's always visible to the user.
-    const knownValues = Array.from(select.options).map((o) => o.value);
-    if (ec.entity && !knownValues.includes(ec.entity)) {
-      const opt = document.createElement('option');
-      opt.value = ec.entity;
-      opt.textContent = `${ec.entity} (not found)`;
-      // Insert after the blank placeholder (index 0)
-      select.insertBefore(opt, select.options[1] ?? null);
-    }
-
-    select.value = ec.entity ?? '';
-    select.addEventListener('change', (e: Event) => {
-      const newVal = (e.target as HTMLSelectElement).value;
+    // Entity picker (uses the same ha-entity-picker as HA's own Map card editor)
+    const picker = document.createElement('ha-entity-picker') as HTMLElement & {
+      hass?: HomeAssistant;
+      value?: string;
+      label?: string;
+      includeDomains?: string[];
+    };
+    picker.label = 'Entity';
+    picker.value = ec.entity ?? '';
+    picker.includeDomains = ['device_tracker', 'person'];
+    if (this._hass) picker.hass = this._hass;
+    picker.addEventListener('value-changed', (e: Event) => {
+      const newVal = (e as CustomEvent<{ value: string }>).detail.value;
       const updated = [...allEntities];
       updated[idx] = { ...updated[idx], entity: newVal };
       this._updateConfig({ entities: updated });
     });
-
-    selectWrap.appendChild(selectLabel);
-    selectWrap.appendChild(select);
-    row.appendChild(selectWrap);
+    row.appendChild(picker);
 
     // Name input
     const nameField = document.createElement('ha-textfield');
