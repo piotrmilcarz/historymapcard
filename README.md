@@ -45,6 +45,8 @@ Add this repository as a custom repository in HACS under _Frontend_.
 
 ## Configuration
 
+Configuration is possible via UI or yaml file.
+
 ```yaml
 type: custom:history-map-card
 entities:
@@ -89,7 +91,17 @@ title: "Fleet Tracker"       # optional card title
 ```bash
 npm install
 npm run build
+# or npm run build:dev to prevent minification
 # Output: history-map-card.js
+```
+
+### Tests
+
+```bash
+npm install
+npm run test
+npm run test:watch
+npm run test:coverage
 ```
 
 ### Watch mode
