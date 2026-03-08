@@ -434,8 +434,8 @@ class HistoryMapCard extends HTMLElement {
   private _historyFetchedAt = 0;
   private _bounds: L.LatLngBoundsExpression | null = null;
   private _resizeObserver: ResizeObserver | null = null;
+  private _resizeRecoveryDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private _intersectionObserver: IntersectionObserver | null = null;
-  private _resizeRecoveryTimers: Array<ReturnType<typeof setTimeout>> = [];
   private _onDocumentVisibilityChange = () => {
     if (!document.hidden) {
       this._scheduleMapResizeRecovery();
@@ -521,8 +521,10 @@ class HistoryMapCard extends HTMLElement {
     this._animationMarkers.clear();
     this._animationPaths.clear();
     this._initialViewSet = false;
-    this._resizeRecoveryTimers.forEach((timer) => clearTimeout(timer));
-    this._resizeRecoveryTimers = [];
+    if (this._resizeRecoveryDebounceTimer !== null) {
+      clearTimeout(this._resizeRecoveryDebounceTimer);
+      this._resizeRecoveryDebounceTimer = null;
+    }
   }
 
   /* ----------------------------------------------------------------
@@ -765,6 +767,13 @@ class HistoryMapCard extends HTMLElement {
   private _scheduleMapResizeRecovery(): void {
     if (!this._map || !this._mapContainer) return;
 
+    // Debounce: if called multiple times in quick succession (e.g. both
+    // visibilitychange and window-focus fire together), collapse into one run.
+    if (this._resizeRecoveryDebounceTimer !== null) {
+      clearTimeout(this._resizeRecoveryDebounceTimer);
+      this._resizeRecoveryDebounceTimer = null;
+    }
+
     const recover = () => {
       if (!this._map || !this._mapContainer) return;
       if (this._mapContainer.offsetWidth <= 0 || this._mapContainer.offsetHeight <= 0) {
@@ -772,18 +781,19 @@ class HistoryMapCard extends HTMLElement {
       }
       const mapInternal = this._map as L.Map & { _loaded?: boolean };
       if (!mapInternal._loaded) return;
+      // invalidateSize() fixes any layout mismatch without reloading tiles.
+      // Do NOT call layer.redraw() — it forces all tiles to re-fetch and
+      // causes the map to visibly blink 3-5 times on tab/window focus.
       this._map.invalidateSize();
-      this._map.eachLayer((layer) => {
-        (layer as L.Layer & { redraw?: () => void }).redraw?.();
-      });
       // Re-attach/refresh current points after visibility/layout transitions.
       this._renderCurrentPositions(true);
     };
 
-    requestAnimationFrame(recover);
-    [120, 300, 700, 1500].forEach((delay) => {
-      this._resizeRecoveryTimers.push(setTimeout(recover, delay));
-    });
+    // Single deferred run after layout has settled.
+    this._resizeRecoveryDebounceTimer = setTimeout(() => {
+      this._resizeRecoveryDebounceTimer = null;
+      recover();
+    }, 150);
   }
 
   private _assignEntityColors(): void {
@@ -1444,8 +1454,7 @@ class HistoryMapCardEditor extends HTMLElement {
       return;
     }
     this._pickerLoading = true;
-    const loadHelpers = (window as unknown as Record<string, unknown>)
-      ['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
+    const loadHelpers = (window as unknown as Record<string, unknown>)['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
     (loadHelpers ? loadHelpers() : Promise.resolve())
       .then(() => {
         const availableNow = this._isPickerAvailable();
