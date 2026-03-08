@@ -14528,7 +14528,10 @@ var leafletSrcExports = requireLeafletSrc();
 var L$1 = /*@__PURE__*/getDefaultExportFromCjs(leafletSrcExports);
 
 /* ------------------------------------------------------------------
- * Default colours assigned per entity when not set in config
+ * Pure utility functions — no DOM, no Leaflet, fully unit-testable
+ * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------
+ * Constants
  * ------------------------------------------------------------------ */
 const ENTITY_COLORS = [
     '#0288d1',
@@ -14540,6 +14543,105 @@ const ENTITY_COLORS = [
     '#3949ab',
     '#d81b60',
 ];
+/* ------------------------------------------------------------------
+ * Date / time formatting
+ * ------------------------------------------------------------------ */
+function formatTime(date) {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+function formatDateTime(date) {
+    return (date.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+        ' ' +
+        formatTime(date));
+}
+/* ------------------------------------------------------------------
+ * Theme detection
+ * ------------------------------------------------------------------ */
+function isSystemDarkMode() {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+function getEffectiveTheme(config) {
+    var _a;
+    const themeMode = (_a = config.theme_mode) !== null && _a !== void 0 ? _a : 'auto';
+    if (themeMode === 'light')
+        return 'light';
+    if (themeMode === 'dark')
+        return 'dark';
+    // auto: follow the system preference
+    return isSystemDarkMode() ? 'dark' : 'light';
+}
+function isDarkMode(config) {
+    return getEffectiveTheme(config) === 'dark';
+}
+/* ------------------------------------------------------------------
+ * Zoom clamping
+ * ------------------------------------------------------------------ */
+/**
+ * Clamp a raw zoom value (number, numeric string, or undefined) to a valid
+ * integer in [1, 20].  Returns 14 when the value is absent or non-numeric.
+ */
+function clampZoom(raw) {
+    const parsed = typeof raw === 'number'
+        ? raw
+        : typeof raw === 'string'
+            ? Number(raw)
+            : NaN;
+    if (!Number.isFinite(parsed))
+        return 14;
+    return Math.min(20, Math.max(1, Math.round(parsed)));
+}
+/* ------------------------------------------------------------------
+ * Entity config normalisation
+ * ------------------------------------------------------------------ */
+/**
+ * Normalise the mixed `entities` array (strings or EntityConfig objects) into
+ * a uniform list of EntityConfig objects.
+ */
+function normalizeEntityConfigs(entities) {
+    return entities.map((e) => typeof e === 'string' ? { entity: e } : e);
+}
+/* ------------------------------------------------------------------
+ * History data processing
+ * ------------------------------------------------------------------ */
+/**
+ * The HA history API may return either an Array<Array<HistoryState>> (legacy)
+ * or a Record<string, HistoryState[]> (newer recorder endpoint).
+ * This normalises both shapes to an array-of-arrays.
+ */
+function normalizeHistories(data) {
+    return Array.isArray(data)
+        ? data
+        : Object.values(data);
+}
+/**
+ * Extract all GPS-bearing history states into a flat, time-sorted list of
+ * TimelinePoint objects.  This is a pure transformation — no Leaflet required.
+ */
+function extractTimelinePoints(data, entityConfigs) {
+    const histories = normalizeHistories(data);
+    const points = [];
+    histories.forEach((entityHistory, index) => {
+        var _a, _b, _c;
+        if (!entityHistory || entityHistory.length === 0)
+            return;
+        const entityId = (_b = (_a = entityHistory.find((s) => s.entity_id)) === null || _a === void 0 ? void 0 : _a.entity_id) !== null && _b !== void 0 ? _b : (_c = entityConfigs[index]) === null || _c === void 0 ? void 0 : _c.entity;
+        if (!entityId)
+            return;
+        entityHistory.forEach((state) => {
+            var _a, _b, _c;
+            const lat = (_a = state.attributes) === null || _a === void 0 ? void 0 : _a.latitude;
+            const lng = (_b = state.attributes) === null || _b === void 0 ? void 0 : _b.longitude;
+            if (lat == null || lng == null)
+                return;
+            const ts = new Date((_c = state.last_updated) !== null && _c !== void 0 ? _c : state.last_changed).getTime();
+            points.push({ timestamp: ts, entityId, lat, lng });
+        });
+    });
+    // Sort chronologically across all entities
+    points.sort((a, b) => a.timestamp - b.timestamp);
+    return points;
+}
+
 const TILE_URL = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
 const TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>';
 /* ------------------------------------------------------------------
@@ -14802,14 +14904,6 @@ const CARD_CSS = `
 /* ------------------------------------------------------------------
  * Helpers
  * ------------------------------------------------------------------ */
-function formatTime(date) {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-function formatDateTime(date) {
-    return (date.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-        ' ' +
-        formatTime(date));
-}
 function createDotIcon(color, size = 14, opacity = 1, border = 'rgba(255,255,255,0.85)') {
     return L$1.divIcon({
         className: '',
@@ -14818,25 +14912,6 @@ function createDotIcon(color, size = 14, opacity = 1, border = 'rgba(255,255,255
         iconAnchor: [size / 2, size / 2],
         tooltipAnchor: [size / 2, 0],
     });
-}
-/* ------------------------------------------------------------------
- * Theme detection helpers
- * ------------------------------------------------------------------ */
-function isSystemDarkMode() {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches;
-}
-function getEffectiveTheme(config) {
-    var _a;
-    const themeMode = (_a = config.theme_mode) !== null && _a !== void 0 ? _a : 'auto';
-    if (themeMode === 'light')
-        return 'light';
-    if (themeMode === 'dark')
-        return 'dark';
-    // auto: detect system preference
-    return isSystemDarkMode() ? 'dark' : 'light';
-}
-function isDarkMode(config) {
-    return getEffectiveTheme(config) === 'dark';
 }
 /* ------------------------------------------------------------------
  * HistoryMapCard custom element
@@ -15148,7 +15223,7 @@ class HistoryMapCard extends HTMLElement {
     _getEntityConfigs() {
         if (!this._config)
             return [];
-        return this._config.entities.map((e) => typeof e === 'string' ? { entity: e } : e);
+        return normalizeEntityConfigs(this._config.entities);
     }
     _scheduleMapResizeRecovery() {
         if (!this._map || !this._mapContainer)
@@ -15193,15 +15268,7 @@ class HistoryMapCard extends HTMLElement {
     }
     _getDefaultZoom() {
         var _a;
-        const raw = (_a = this._config) === null || _a === void 0 ? void 0 : _a.default_zoom;
-        const parsed = typeof raw === 'number'
-            ? raw
-            : typeof raw === 'string'
-                ? Number(raw)
-                : NaN;
-        if (!Number.isFinite(parsed))
-            return 14;
-        return Math.min(20, Math.max(1, Math.round(parsed)));
+        return clampZoom((_a = this._config) === null || _a === void 0 ? void 0 : _a.default_zoom);
     }
     /* ----------------------------------------------------------------
      * Current-position markers (always shown, like HA map card)
@@ -15316,34 +15383,24 @@ class HistoryMapCard extends HTMLElement {
         // Remove old static history paths
         this._historyPathLines.forEach((p) => p.remove());
         this._historyPathLines.clear();
-        const allPoints = [];
-        // HA may return an Array<Array<HistoryState>> (legacy endpoint) or a
-        // Record<string, HistoryState[]> (newer recorder endpoint).  Normalise to
-        // array-of-arrays so the rest of the logic is uniform.
-        const histories = Array.isArray(data)
-            ? data
-            : Object.values(data);
         const entityConfigs = this._getEntityConfigs();
+        // Build per-entity Leaflet polylines (Leaflet-specific, kept here)
+        const histories = normalizeHistories(data);
         histories.forEach((entityHistory, index) => {
             var _a, _b, _c;
             if (!entityHistory || entityHistory.length === 0)
                 return;
-            // `entity_id` may be absent when HA omits it from minimal responses;
-            // search all states in the array first (more robust), then fall back to
-            // matching by position in the filter_entity_id list.
             const entityId = (_b = (_a = entityHistory.find((s) => s.entity_id)) === null || _a === void 0 ? void 0 : _a.entity_id) !== null && _b !== void 0 ? _b : (_c = entityConfigs[index]) === null || _c === void 0 ? void 0 : _c.entity;
             if (!entityId)
                 return;
             const color = this._getEntityColor(entityId);
             const coords = [];
             entityHistory.forEach((state) => {
-                var _a, _b, _c;
+                var _a, _b;
                 const lat = (_a = state.attributes) === null || _a === void 0 ? void 0 : _a.latitude;
                 const lng = (_b = state.attributes) === null || _b === void 0 ? void 0 : _b.longitude;
                 if (lat == null || lng == null)
                     return;
-                const ts = new Date((_c = state.last_updated) !== null && _c !== void 0 ? _c : state.last_changed).getTime();
-                allPoints.push({ timestamp: ts, entityId, lat, lng });
                 coords.push(L$1.latLng(lat, lng));
             });
             if (coords.length > 1) {
@@ -15356,10 +15413,10 @@ class HistoryMapCard extends HTMLElement {
                 this._historyPathLines.set(entityId, line);
             }
         });
+        // Pure data transformation delegated to utils
+        const allPoints = extractTimelinePoints(data, entityConfigs);
         if (allPoints.length === 0)
             return;
-        // Sort all points by time
-        allPoints.sort((a, b) => a.timestamp - b.timestamp);
         this._timelinePoints = allPoints;
         // Fit bounds to history
         const latLngs = allPoints.map((p) => L$1.latLng(p.lat, p.lng));
@@ -16027,3 +16084,5 @@ window.customCards.push({
 });
 customElements.define('history-map-card-editor', HistoryMapCardEditor);
 customElements.define('history-map-card', HistoryMapCard);
+
+export { HistoryMapCard };

@@ -1,7 +1,24 @@
 import L from 'leaflet';
+import type {
+  HomeAssistant,
+  EntityConfig,
+  HistoryMapCardConfig,
+  HistoryState,
+  TimelinePoint,
+} from './types.js';
+import {
+  ENTITY_COLORS,
+  formatTime,
+  formatDateTime,
+  isDarkMode,
+  clampZoom,
+  normalizeEntityConfigs,
+  normalizeHistories,
+  extractTimelinePoints,
+} from './utils.js';
 
 /* ------------------------------------------------------------------
- * Type definitions for Home Assistant integration
+ * Window augmentation for HA custom card registration
  * ------------------------------------------------------------------ */
 
 declare global {
@@ -9,79 +26,6 @@ declare global {
     customCards?: Array<Record<string, unknown>>;
   }
 }
-
-interface HassEntity {
-  entity_id: string;
-  state: string;
-  attributes: {
-    latitude?: number;
-    longitude?: number;
-    gps_accuracy?: number;
-    friendly_name?: string;
-    icon?: string;
-    source?: string;
-    [key: string]: unknown;
-  };
-}
-
-interface HomeAssistant {
-  states: Record<string, HassEntity>;
-  callApi: <T>(
-    method: 'GET' | 'POST',
-    path: string,
-    parameters?: Record<string, unknown>
-  ) => Promise<T>;
-}
-
-interface EntityConfig {
-  entity: string;
-  name?: string;
-  color?: string;
-}
-
-interface HistoryMapCardConfig {
-  type: string;
-  entities: Array<EntityConfig | string>;
-  hours_to_show?: number;
-  default_zoom?: number;
-  dark_mode?: boolean;
-  theme_mode?: 'auto' | 'light' | 'dark';
-  title?: string;
-}
-
-interface HistoryState {
-  entity_id?: string;
-  state: string;
-  attributes?: {
-    latitude?: number;
-    longitude?: number;
-    friendly_name?: string;
-    [key: string]: unknown;
-  };
-  last_changed: string;
-  last_updated?: string;
-}
-
-interface TimelinePoint {
-  timestamp: number;
-  entityId: string;
-  lat: number;
-  lng: number;
-}
-
-/* ------------------------------------------------------------------
- * Default colours assigned per entity when not set in config
- * ------------------------------------------------------------------ */
-const ENTITY_COLORS = [
-  '#0288d1',
-  '#e53935',
-  '#43a047',
-  '#8e24aa',
-  '#fb8c00',
-  '#00acc1',
-  '#3949ab',
-  '#d81b60',
-];
 
 const TILE_URL =
   'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
@@ -351,18 +295,6 @@ const CARD_CSS = `
  * Helpers
  * ------------------------------------------------------------------ */
 
-function formatTime(date: Date): string {
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function formatDateTime(date: Date): string {
-  return (
-    date.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-    ' ' +
-    formatTime(date)
-  );
-}
-
 function createDotIcon(
   color: string,
   size = 14,
@@ -376,26 +308,6 @@ function createDotIcon(
     iconAnchor: [size / 2, size / 2],
     tooltipAnchor: [size / 2, 0],
   });
-}
-
-/* ------------------------------------------------------------------
- * Theme detection helpers
- * ------------------------------------------------------------------ */
-
-function isSystemDarkMode(): boolean {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches;
-}
-
-function getEffectiveTheme(config: HistoryMapCardConfig): 'light' | 'dark' {
-  const themeMode = config.theme_mode ?? 'auto';
-  if (themeMode === 'light') return 'light';
-  if (themeMode === 'dark') return 'dark';
-  // auto: detect system preference
-  return isSystemDarkMode() ? 'dark' : 'light';
-}
-
-function isDarkMode(config: HistoryMapCardConfig): boolean {
-  return getEffectiveTheme(config) === 'dark';
 }
 
 /* ------------------------------------------------------------------
@@ -759,9 +671,7 @@ class HistoryMapCard extends HTMLElement {
 
   private _getEntityConfigs(): EntityConfig[] {
     if (!this._config) return [];
-    return this._config.entities.map((e) =>
-      typeof e === 'string' ? { entity: e } : e
-    );
+    return normalizeEntityConfigs(this._config.entities);
   }
 
   private _scheduleMapResizeRecovery(): void {
@@ -810,15 +720,7 @@ class HistoryMapCard extends HTMLElement {
   }
 
   private _getDefaultZoom(): number {
-    const raw = this._config?.default_zoom;
-    const parsed =
-      typeof raw === 'number'
-        ? raw
-        : typeof raw === 'string'
-          ? Number(raw)
-          : NaN;
-    if (!Number.isFinite(parsed)) return 14;
-    return Math.min(20, Math.max(1, Math.round(parsed)));
+    return clampZoom(this._config?.default_zoom);
   }
 
   /* ----------------------------------------------------------------
@@ -944,22 +846,12 @@ class HistoryMapCard extends HTMLElement {
     this._historyPathLines.forEach((p) => p.remove());
     this._historyPathLines.clear();
 
-    const allPoints: TimelinePoint[] = [];
-
-    // HA may return an Array<Array<HistoryState>> (legacy endpoint) or a
-    // Record<string, HistoryState[]> (newer recorder endpoint).  Normalise to
-    // array-of-arrays so the rest of the logic is uniform.
-    const histories: HistoryState[][] = Array.isArray(data)
-      ? data
-      : Object.values(data as Record<string, HistoryState[]>);
-
     const entityConfigs = this._getEntityConfigs();
 
+    // Build per-entity Leaflet polylines (Leaflet-specific, kept here)
+    const histories = normalizeHistories(data);
     histories.forEach((entityHistory, index) => {
       if (!entityHistory || entityHistory.length === 0) return;
-      // `entity_id` may be absent when HA omits it from minimal responses;
-      // search all states in the array first (more robust), then fall back to
-      // matching by position in the filter_entity_id list.
       const entityId =
         entityHistory.find((s) => s.entity_id)?.entity_id ??
         entityConfigs[index]?.entity;
@@ -967,14 +859,10 @@ class HistoryMapCard extends HTMLElement {
       const color = this._getEntityColor(entityId);
 
       const coords: L.LatLng[] = [];
-
       entityHistory.forEach((state) => {
         const lat = state.attributes?.latitude;
         const lng = state.attributes?.longitude;
         if (lat == null || lng == null) return;
-
-        const ts = new Date(state.last_updated ?? state.last_changed).getTime();
-        allPoints.push({ timestamp: ts, entityId, lat, lng });
         coords.push(L.latLng(lat, lng));
       });
 
@@ -989,10 +877,10 @@ class HistoryMapCard extends HTMLElement {
       }
     });
 
+    // Pure data transformation delegated to utils
+    const allPoints = extractTimelinePoints(data, entityConfigs);
     if (allPoints.length === 0) return;
 
-    // Sort all points by time
-    allPoints.sort((a, b) => a.timestamp - b.timestamp);
     this._timelinePoints = allPoints;
 
     // Fit bounds to history
@@ -1748,3 +1636,5 @@ window.customCards.push({
 
 customElements.define('history-map-card-editor', HistoryMapCardEditor);
 customElements.define('history-map-card', HistoryMapCard);
+
+export { HistoryMapCard };

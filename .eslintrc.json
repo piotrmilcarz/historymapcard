@@ -17,5 +17,18 @@
   "env": {
     "browser": true,
     "es2020": true
-  }
+  },
+  "overrides": [
+    {
+      "files": ["src/test/**/*.ts"],
+      "parserOptions": {
+        "project": "./tsconfig.test.json"
+      },
+      "env": {
+        "browser": true,
+        "es2020": true,
+        "node": true
+      }
+    }
+  ]
 }
