@@ -13,21 +13,7 @@ A **Home Assistant custom Lovelace card** that extends the built-in _Map card_ w
 
 ## Screenshot / Demo
 
-```
-┌─────────────────────────────────────────────────┐
-│              History Map Card                   │
-│  ┌───────────────────────────────────────────┐  │
-│  │                                           │  │
-│  │              [Leaflet map]                │  │
-│  │                                           │  │
-│  └───────────────────────────────────────────┘  │
-│  ● My Phone  ● Another device                   │
-│  ┌──────────────────────────────────────────┐   │
-│  │ ▶  ─────────●────────────────────  14:32 │   │
-│  │    08:00              now                │   │
-│  └──────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────┘
-```
+![History Map Card – London Marathon 2025 route](docs/screenshot.png)
 
 ## Installation
 

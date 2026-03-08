@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HistoryMapCard - Integration Test Fixture</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { width: 960px; background: #f0f2f5; font-family: sans-serif; padding: 16px; }
+      history-map-card { display: block; width: 900px; }
+    </style>
+  </head>
+  <body>
+    <history-map-card id="card"></history-map-card>
+
+    <script type="module">
+      if (!customElements.get('ha-card')) {
+        customElements.define('ha-card', class extends HTMLElement {
+          connectedCallback() {
+            this.style.cssText = 'display:block;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.18);overflow:hidden;';
+          }
+        });
+      }
+
+      await import('../history-map-card.js');
+      await customElements.whenDefined('history-map-card');
+
+      // TCS London Marathon 2025 – 27 April 2025
+      // Exact GPS trace from official Garmin Connect GPX, downsampled to 115 points
+      // Start: Blackheath/Greenwich (lat 51.47309, lon 0.01158)
+      // Finish: The Mall          (lat 51.50265, lon -0.13860)
+      const MARATHON_COORDS = [
+        [51.47309, 0.01158],[51.47420, 0.02057],[51.47480, 0.02399],
+        [51.47511, 0.02638],[51.47505, 0.03248],[51.47585, 0.03866],
+        [51.47813, 0.04260],[51.47957, 0.04898],[51.48098, 0.05675],
+        [51.48293, 0.06210],[51.48444, 0.06235],[51.48723, 0.06340],
+        [51.49074, 0.06205],[51.49337, 0.06108],[51.49301, 0.05690],
+        [51.49213, 0.05089],[51.49253, 0.04562],[51.49053, 0.04021],
+        [51.48965, 0.03809],[51.48802, 0.03199],[51.48730, 0.02598],
+        [51.48664, 0.02192],[51.48643, 0.01756],[51.48614, 0.01266],
+        [51.48542, 0.00598],[51.48341,-0.00084],[51.48126,-0.00784],
+        [51.48262,-0.00982],[51.48142,-0.01466],[51.48111,-0.01947],
+        [51.48132,-0.02547],[51.48381,-0.03175],[51.48718,-0.03690],
+        [51.48965,-0.04158],[51.49171,-0.04460],[51.49367,-0.04560],
+        [51.49504,-0.04509],[51.49638,-0.04600],[51.49841,-0.04570],
+        [51.49884,-0.04284],[51.49629,-0.04040],[51.49893,-0.03575],
+        [51.50194,-0.03567],[51.50510,-0.03714],[51.50555,-0.04162],
+        [51.50387,-0.04668],[51.50049,-0.05228],[51.49956,-0.05501],
+        [51.49867,-0.06044],[51.49800,-0.06565],[51.49829,-0.06879],
+        [51.50001,-0.07256],[51.50105,-0.07530],[51.50291,-0.07707],
+        [51.50675,-0.07453],[51.50892,-0.07380],[51.50897,-0.06790],
+        [51.50934,-0.06202],[51.50965,-0.05597],[51.50972,-0.05032],
+        [51.51034,-0.04359],[51.50982,-0.03788],[51.50865,-0.03171],
+        [51.50910,-0.02680],[51.50751,-0.02753],[51.50543,-0.02694],
+        [51.50381,-0.02568],[51.50093,-0.02603],[51.49681,-0.02579],
+        [51.49289,-0.02490],[51.49007,-0.02236],[51.48757,-0.01687],
+        [51.48852,-0.01349],[51.49078,-0.01454],[51.49489,-0.01422],
+        [51.49928,-0.01350],[51.50098,-0.02164],[51.50328,-0.02521],
+        [51.50350,-0.02124],[51.50290,-0.01888],[51.50453,-0.01889],
+        [51.50553,-0.02194],[51.50474,-0.01468],[51.50453,-0.01252],
+        [51.50667,-0.01063],[51.50680,-0.00907],[51.50748,-0.00901],
+        [51.50887,-0.01269],[51.50927,-0.02013],[51.50901,-0.02328],
+        [51.51125,-0.02782],[51.51246,-0.03388],[51.51265,-0.03878],
+        [51.51274,-0.04122],[51.51038,-0.04384],[51.50980,-0.04820],
+        [51.50966,-0.05357],[51.50972,-0.05762],[51.50935,-0.06281],
+        [51.50886,-0.06842],[51.50898,-0.07334],[51.50943,-0.07775],
+        [51.50908,-0.08144],[51.50953,-0.08645],[51.51069,-0.09224],
+        [51.51116,-0.09856],[51.51105,-0.10838],[51.51062,-0.11521],
+        [51.50955,-0.11906],[51.50626,-0.12259],[51.50169,-0.12406],
+        [51.50125,-0.12906],[51.50045,-0.13898],[51.50201,-0.13988],
+        [51.50265,-0.13860], // Finish – The Mall
+      ];
+
+      // 27 April 2025, mass-start: 10:00 BST = 09:00 UTC
+      const RACE_START = new Date('2025-04-27T09:00:00Z').getTime();
+      // Finish time: start + 4 h 30 min
+      const RACE_DURATION_MS = (4 * 3600 + 30 * 60) * 1000;
+
+      const marathonHistory = MARATHON_COORDS.map(([lat, lng], i) => ({
+        entity_id: 'device_tracker.marathon_runner',
+        state: 'not_home',
+        attributes: { latitude: lat, longitude: lng, friendly_name: 'Marathon Runner', gps_accuracy: 5 },
+        last_changed: new Date(
+          RACE_START + (i / (MARATHON_COORDS.length - 1)) * RACE_DURATION_MS
+        ).toISOString(),
+      }));
+
+      const card = document.getElementById('card');
+
+      card.setConfig({
+        type: 'custom:history-map-card',
+        title: 'London Marathon 2025',
+        entities: [{ entity: 'device_tracker.marathon_runner', name: 'Runner', color: '#0288d1' }],
+        hours_to_show: 6,
+        default_zoom: 12,
+        theme_mode: 'light',
+      });
+
+      card.hass = {
+        states: {
+          'device_tracker.marathon_runner': {
+            entity_id: 'device_tracker.marathon_runner',
+            state: 'not_home',
+            attributes: { latitude: 51.50265, longitude: -0.13860, friendly_name: 'Marathon Runner' },
+          },
+        },
+        callApi: async (_method, _path) => {
+          await new Promise(r => setTimeout(r, 80));
+          return [marathonHistory];
+        },
+      };
+
+      window.__cardReady = true;
+    </script>
+  </body>
+</html>

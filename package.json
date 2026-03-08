@@ -11,7 +11,11 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "playwright test",
+    "test:integration:update": "playwright test --update-snapshots",
+    "test:integration:report": "playwright show-report",
+    "test:all": "npm run test && npm run test:integration"
   },
   "repository": {
     "type": "git",
@@ -27,6 +31,7 @@
   "homepage": "https://github.com/piotrmilcarz/historymapcard#readme",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.58.2",
     "@rollup/plugin-commonjs": "^29.0.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-typescript": "^12.3.0",
