@@ -90,6 +90,14 @@ npm run test:watch
 npm run test:coverage
 ```
 
+### Update screenshot for integration test
+
+```docker build --platform linux/amd64 -f Dockerfile.playwright-update -t playwright-snapshot-update . \
+  && CONTAINER_ID=$(docker create playwright-snapshot-update) \
+  && docker cp "$CONTAINER_ID:/app/src/test/integration/__screenshots__/marathon-map.spec.ts-snapshots/." \
+       src/test/integration/__screenshots__/marathon-map.spec.ts-snapshots/ \
+  && docker rm "$CONTAINER_ID"```
+
 ### Watch mode
 
 ```bash
