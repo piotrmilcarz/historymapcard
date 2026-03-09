@@ -96,7 +96,8 @@ npm run test:coverage
   && CONTAINER_ID=$(docker create playwright-snapshot-update) \
   && docker cp "$CONTAINER_ID:/app/src/test/integration/__screenshots__/marathon-map.spec.ts-snapshots/." \
        src/test/integration/__screenshots__/marathon-map.spec.ts-snapshots/ \
-  && docker rm "$CONTAINER_ID"```
+  && docker rm "$CONTAINER_ID"
+```
 
 ### Watch mode
 
