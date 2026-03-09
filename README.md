@@ -13,21 +13,7 @@ A **Home Assistant custom Lovelace card** that extends the built-in _Map card_ w
 
 ## Screenshot / Demo
 
-```
-┌─────────────────────────────────────────────────┐
-│              History Map Card                   │
-│  ┌───────────────────────────────────────────┐  │
-│  │                                           │  │
-│  │              [Leaflet map]                │  │
-│  │                                           │  │
-│  └───────────────────────────────────────────┘  │
-│  ● My Phone  ● Another device                   │
-│  ┌──────────────────────────────────────────┐   │
-│  │ ▶  ─────────●────────────────────  14:32 │   │
-│  │    08:00              now                │   │
-│  └──────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────┘
-```
+![History Map Card – London Marathon 2025 route](docs/screenshot.png)
 
 ## Installation
 
@@ -44,6 +30,8 @@ A **Home Assistant custom Lovelace card** that extends the built-in _Map card_ w
 Add this repository as a custom repository in HACS under _Frontend_.
 
 ## Configuration
+
+Configuration is possible via UI or yaml file.
 
 ```yaml
 type: custom:history-map-card
@@ -89,8 +77,26 @@ title: "Fleet Tracker"       # optional card title
 ```bash
 npm install
 npm run build
+# or npm run build:dev to prevent minification
 # Output: history-map-card.js
 ```
+
+### Tests
+
+```bash
+npm install
+npm run test
+npm run test:watch
+npm run test:coverage
+```
+
+### Update screenshot for integration test
+
+```docker build --platform linux/amd64 -f Dockerfile.playwright-update -t playwright-snapshot-update . \
+  && CONTAINER_ID=$(docker create playwright-snapshot-update) \
+  && docker cp "$CONTAINER_ID:/app/src/test/integration/__screenshots__/marathon-map.spec.ts-snapshots/." \
+       src/test/integration/__screenshots__/marathon-map.spec.ts-snapshots/ \
+  && docker rm "$CONTAINER_ID"```
 
 ### Watch mode
 

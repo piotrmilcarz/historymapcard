@@ -1,0 +1,15 @@
+FROM mcr.microsoft.com/playwright:v1.58.2-noble
+
+WORKDIR /app
+
+# Copy package files first for layer caching
+COPY package.json package-lock.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy the rest of the project
+COPY . .
+
+# Update snapshots
+RUN npm run test:integration:update

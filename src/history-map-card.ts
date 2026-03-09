@@ -1,85 +1,36 @@
 import L from 'leaflet';
+import type {
+  HomeAssistant,
+  EntityConfig,
+  HistoryMapCardConfig,
+  HistoryState,
+  TimelinePoint,
+} from './types.js';
+import {
+  ENTITY_COLORS,
+  formatTime,
+  formatDateTime,
+  isDarkMode,
+  clampZoom,
+  normalizeEntityConfigs,
+  normalizeHistories,
+  extractTimelinePoints,
+} from './utils.js';
 
 /* ------------------------------------------------------------------
- * Type definitions for Home Assistant integration
+ * Window augmentation for HA custom card registration
  * ------------------------------------------------------------------ */
 
-interface HassEntity {
-  entity_id: string;
-  state: string;
-  attributes: {
-    latitude?: number;
-    longitude?: number;
-    gps_accuracy?: number;
-    friendly_name?: string;
-    icon?: string;
-    source?: string;
-    [key: string]: unknown;
-  };
+declare global {
+  interface Window {
+    customCards?: Array<Record<string, unknown>>;
+  }
 }
-
-interface HomeAssistant {
-  states: Record<string, HassEntity>;
-  callApi: <T>(
-    method: 'GET' | 'POST',
-    path: string,
-    parameters?: Record<string, unknown>
-  ) => Promise<T>;
-}
-
-interface EntityConfig {
-  entity: string;
-  name?: string;
-  color?: string;
-}
-
-interface HistoryMapCardConfig {
-  type: string;
-  entities: Array<EntityConfig | string>;
-  hours_to_show?: number;
-  default_zoom?: number;
-  dark_mode?: boolean;
-  title?: string;
-}
-
-interface HistoryState {
-  entity_id?: string;
-  state: string;
-  attributes?: {
-    latitude?: number;
-    longitude?: number;
-    friendly_name?: string;
-    [key: string]: unknown;
-  };
-  last_changed: string;
-  last_updated?: string;
-}
-
-interface TimelinePoint {
-  timestamp: number;
-  entityId: string;
-  lat: number;
-  lng: number;
-}
-
-/* ------------------------------------------------------------------
- * Default colours assigned per entity when not set in config
- * ------------------------------------------------------------------ */
-const ENTITY_COLORS = [
-  '#0288d1',
-  '#e53935',
-  '#43a047',
-  '#8e24aa',
-  '#fb8c00',
-  '#00acc1',
-  '#3949ab',
-  '#d81b60',
-];
 
 const TILE_URL =
-  'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
 const TILE_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
 /* ------------------------------------------------------------------
  * Leaflet CSS — injected once into the document head
@@ -213,6 +164,14 @@ svg.leaflet-zoom-animated{will-change:transform}
 const CARD_CSS = `
   :host {
     display: block;
+    /* Create a new stacking context so that Leaflet's high z-index panes
+       (up to 1000 for controls) are contained within the card element and
+       do not bleed over the HA card editor dialog that overlays the preview.
+       position + z-index are required so the stacking context has an explicit
+       level (0) that is below the HA dialog z-index. */
+    position: relative;
+    z-index: 0;
+    isolation: isolate;
   }
   ha-card {
     overflow: hidden;
@@ -305,6 +264,26 @@ const CARD_CSS = `
     border: 2px solid rgba(255,255,255,0.8);
     box-shadow: 0 1px 3px rgba(0,0,0,0.4);
   }
+  .leaflet-container img.leaflet-tile {
+    mix-blend-mode: normal !important;
+  }
+  /* Dark mode — identical to HA map component */
+  #map.dark {
+    background: #090909;
+  }
+  .leaflet-tile-pane {
+    filter: var(--map-filter, invert(0));
+  }
+  #map.dark {
+    --map-filter: invert(0.9) hue-rotate(170deg) brightness(1.5) contrast(1.2) saturate(0.3);
+  }
+  #map.dark .leaflet-bar a {
+    background-color: #1c1c1c;
+    color: #ffffff;
+  }
+  #map.dark .leaflet-bar a:hover {
+    background-color: #313131;
+  }
   .loading-msg {
     padding: 8px 16px;
     font-size: 0.85em;
@@ -315,18 +294,6 @@ const CARD_CSS = `
 /* ------------------------------------------------------------------
  * Helpers
  * ------------------------------------------------------------------ */
-
-function formatTime(date: Date): string {
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function formatDateTime(date: Date): string {
-  return (
-    date.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-    ' ' +
-    formatTime(date)
-  );
-}
 
 function createDotIcon(
   color: string,
@@ -378,6 +345,24 @@ class HistoryMapCard extends HTMLElement {
   private _initialViewSet = false;
   private _historyFetchedAt = 0;
   private _bounds: L.LatLngBoundsExpression | null = null;
+  private _resizeObserver: ResizeObserver | null = null;
+  private _resizeRecoveryDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private _intersectionObserver: IntersectionObserver | null = null;
+  private _onDocumentVisibilityChange = () => {
+    if (!document.hidden) {
+      this._scheduleMapResizeRecovery();
+    }
+  };
+  private _onWindowFocus = () => {
+    this._scheduleMapResizeRecovery();
+  };
+  private _themeMediaQuery: MediaQueryList | null = null;
+  private _onThemeChange = () => {
+    // If in auto mode, update map theme when system preference changes
+    if (this._config?.theme_mode === 'auto' || !this._config?.theme_mode) {
+      this._updateMapTheme();
+    }
+  };
 
   constructor() {
     super();
@@ -385,12 +370,72 @@ class HistoryMapCard extends HTMLElement {
   }
 
   connectedCallback(): void {
+    if (!this._intersectionObserver) {
+      this._intersectionObserver = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          this._scheduleMapResizeRecovery();
+        }
+      });
+    }
+    this._intersectionObserver.observe(this);
+    document.addEventListener(
+      'visibilitychange',
+      this._onDocumentVisibilityChange
+    );
+    window.addEventListener('focus', this._onWindowFocus);
+
+    // Listen for system theme preference changes
+    if (!this._themeMediaQuery) {
+      this._themeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      this._themeMediaQuery.addEventListener('change', this._onThemeChange);
+    }
+
     // When the element is (re-)attached to the DOM, ensure Leaflet
     // recalculates the container size in case layout wasn't ready earlier.
     if (this._map) {
-      requestAnimationFrame(() => {
-        this._map?.invalidateSize();
-      });
+      this._scheduleMapResizeRecovery();
+    } else if (this._mapContainer && this._hass && this._config) {
+      // Map was destroyed by disconnectedCallback; rebuild it now that the
+      // element is back in the DOM and hass is available.
+      this._initMap();
+    }
+  }
+
+  disconnectedCallback(): void {
+    // Clean up Leaflet map when the element is removed from the DOM to
+    // prevent stale map instances when the card is re-initialised.
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
+    this._intersectionObserver?.disconnect();
+    this._intersectionObserver = null;
+    document.removeEventListener(
+      'visibilitychange',
+      this._onDocumentVisibilityChange
+    );
+    window.removeEventListener('focus', this._onWindowFocus);
+    if (this._themeMediaQuery) {
+      this._themeMediaQuery.removeEventListener('change', this._onThemeChange);
+    }
+    if (this._map) {
+      this._map.remove();
+      this._map = null;
+    }
+    if (this._animationTimer !== null) {
+      clearTimeout(this._animationTimer);
+      this._animationTimer = null;
+    }
+    // Clear layer references: when Leaflet map is removed, marker/polyline
+    // instances still exist in memory but are detached from the new map.
+    // Keeping those references causes current points to disappear after
+    // reconnect/tab switches because we try to reuse stale layers.
+    this._currentMarkers.clear();
+    this._historyPathLines.clear();
+    this._animationMarkers.clear();
+    this._animationPaths.clear();
+    this._initialViewSet = false;
+    if (this._resizeRecoveryDebounceTimer !== null) {
+      clearTimeout(this._resizeRecoveryDebounceTimer);
+      this._resizeRecoveryDebounceTimer = null;
     }
   }
 
@@ -445,6 +490,21 @@ class HistoryMapCard extends HTMLElement {
       this._map.remove();
       this._map = null;
     }
+
+    // Stop any running animation and clear stale layer references so the
+    // rebuilt map starts with a clean slate.
+    if (this._animationTimer !== null) {
+      clearTimeout(this._animationTimer);
+      this._animationTimer = null;
+      this._isPlaying = false;
+    }
+    this._currentMarkers.clear();
+    this._historyPathLines.clear();
+    this._animationMarkers.clear();
+    this._animationPaths.clear();
+    this._timelinePoints = [];
+    this._historyFetchedAt = 0;
+
     this._initialViewSet = false;
 
     const card = document.createElement('ha-card');
@@ -558,25 +618,51 @@ class HistoryMapCard extends HTMLElement {
   private _initMap(): void {
     if (!this._mapContainer || !this._config) return;
 
+    this._initialViewSet = false;
+
     this._map = L.map(this._mapContainer, {
       zoomControl: true,
       attributionControl: true,
     });
 
+    // Ensure the map is considered loaded before any resize/invalidate
+    // sequence runs (e.g. dashboard tab/edit-mode transitions).
+    this._map.setView([0, 0], this._getDefaultZoom());
+
+    // Apply dark class immediately so CSS filter is ready when tiles load
+    this._mapContainer.classList.toggle('dark', isDarkMode(this._config));
+
     L.tileLayer(TILE_URL, {
       attribution: TILE_ATTRIBUTION,
-      maxZoom: 19,
+      subdomains: 'abcd',
+      minZoom: 0,
+      maxZoom: 20,
     }).addTo(this._map);
+
+    // Observe container size changes so Leaflet redraws when the dashboard
+    // switches between edit and view modes (the container may be hidden then
+    // shown, or the layout may change width, without firing lifecycle hooks).
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = new ResizeObserver(() => {
+      const mapInternal = this._map as L.Map & { _loaded?: boolean };
+      if (!mapInternal?._loaded) return;
+      this._map?.invalidateSize();
+    });
+    this._resizeObserver.observe(this._mapContainer);
 
     // Leaflet reads the container dimensions at init time.  Inside a Shadow
     // DOM the layout may not have been computed yet, so explicitly tell
     // Leaflet to recalculate the size once the browser has done layout.
-    requestAnimationFrame(() => {
-      this._map?.invalidateSize();
-    });
+    this._scheduleMapResizeRecovery();
 
     // Render current positions now that map is ready
     this._renderCurrentPositions();
+  }
+
+  private _updateMapTheme(): void {
+    if (!this._mapContainer || !this._config) return;
+    // Toggle the dark class — CSS handles the tile filter, no tile reload needed
+    this._mapContainer.classList.toggle('dark', isDarkMode(this._config));
   }
 
   /* ----------------------------------------------------------------
@@ -585,9 +671,39 @@ class HistoryMapCard extends HTMLElement {
 
   private _getEntityConfigs(): EntityConfig[] {
     if (!this._config) return [];
-    return this._config.entities.map((e) =>
-      typeof e === 'string' ? { entity: e } : e
-    );
+    return normalizeEntityConfigs(this._config.entities);
+  }
+
+  private _scheduleMapResizeRecovery(): void {
+    if (!this._map || !this._mapContainer) return;
+
+    // Debounce: if called multiple times in quick succession (e.g. both
+    // visibilitychange and window-focus fire together), collapse into one run.
+    if (this._resizeRecoveryDebounceTimer !== null) {
+      clearTimeout(this._resizeRecoveryDebounceTimer);
+      this._resizeRecoveryDebounceTimer = null;
+    }
+
+    const recover = () => {
+      if (!this._map || !this._mapContainer) return;
+      if (this._mapContainer.offsetWidth <= 0 || this._mapContainer.offsetHeight <= 0) {
+        return;
+      }
+      const mapInternal = this._map as L.Map & { _loaded?: boolean };
+      if (!mapInternal._loaded) return;
+      // invalidateSize() fixes any layout mismatch without reloading tiles.
+      // Do NOT call layer.redraw() — it forces all tiles to re-fetch and
+      // causes the map to visibly blink 3-5 times on tab/window focus.
+      this._map.invalidateSize();
+      // Re-attach/refresh current points after visibility/layout transitions.
+      this._renderCurrentPositions(true);
+    };
+
+    // Single deferred run after layout has settled.
+    this._resizeRecoveryDebounceTimer = setTimeout(() => {
+      this._resizeRecoveryDebounceTimer = null;
+      recover();
+    }, 150);
   }
 
   private _assignEntityColors(): void {
@@ -603,11 +719,15 @@ class HistoryMapCard extends HTMLElement {
     return this._entityColors.get(entityId) ?? ENTITY_COLORS[0];
   }
 
+  private _getDefaultZoom(): number {
+    return clampZoom(this._config?.default_zoom);
+  }
+
   /* ----------------------------------------------------------------
    * Current-position markers (always shown, like HA map card)
    * -------------------------------------------------------------- */
 
-  private _renderCurrentPositions(): void {
+  private _renderCurrentPositions(forceFit = false): void {
     if (!this._map || !this._hass || !this._config) return;
 
     const validPoints: L.LatLng[] = [];
@@ -625,6 +745,10 @@ class HistoryMapCard extends HTMLElement {
 
       const existing = this._currentMarkers.get(ec.entity);
       if (existing) {
+        const markerInternal = existing as L.Marker & { _map?: L.Map | null };
+        if (!markerInternal._map) {
+          existing.addTo(this._map!);
+        }
         existing.setLatLng(latlng);
         // Ensure current marker is fully visible when not animating
         try {
@@ -634,7 +758,7 @@ class HistoryMapCard extends HTMLElement {
         }
       } else {
         const marker = L.marker(latlng, {
-          icon: createDotIcon(color, 20, 1),
+          icon: createDotIcon(color, 16, 1),
           zIndexOffset: 1200,
         })
           .bindTooltip(
@@ -649,12 +773,15 @@ class HistoryMapCard extends HTMLElement {
     // Fit map to current markers only the very first time (before history has
     // been loaded and fitted).  Without this guard the map snaps back to the
     // current position on every `set hass` call, which HA issues frequently.
-    if (validPoints.length > 0 && !this._initialViewSet) {
+    if (validPoints.length > 0 && (!this._initialViewSet || forceFit)) {
       this._initialViewSet = true;
       if (validPoints.length === 1) {
-        this._map.setView(validPoints[0], this._config.default_zoom ?? 14);
+        this._map.setView(validPoints[0], this._getDefaultZoom());
       } else {
-        this._map.fitBounds(L.latLngBounds(validPoints), { padding: [40, 40] });
+        this._map.fitBounds(L.latLngBounds(validPoints), {
+          padding: [40, 40],
+          maxZoom: this._getDefaultZoom(),
+        });
       }
     }
   }
@@ -672,7 +799,10 @@ class HistoryMapCard extends HTMLElement {
     const startTime = new Date(Date.now() - hoursToShow * 3600 * 1000);
     const entityIds = this._getEntityConfigs()
       .map((e) => e.entity)
+      .filter((id) => id.length > 0)
       .join(',');
+
+    if (!entityIds) return;
 
     try {
       // NOTE: HA's history API checks `minimal_response` and `no_attributes`
@@ -716,22 +846,12 @@ class HistoryMapCard extends HTMLElement {
     this._historyPathLines.forEach((p) => p.remove());
     this._historyPathLines.clear();
 
-    const allPoints: TimelinePoint[] = [];
-
-    // HA may return an Array<Array<HistoryState>> (legacy endpoint) or a
-    // Record<string, HistoryState[]> (newer recorder endpoint).  Normalise to
-    // array-of-arrays so the rest of the logic is uniform.
-    const histories: HistoryState[][] = Array.isArray(data)
-      ? data
-      : Object.values(data as Record<string, HistoryState[]>);
-
     const entityConfigs = this._getEntityConfigs();
 
+    // Build per-entity Leaflet polylines (Leaflet-specific, kept here)
+    const histories = normalizeHistories(data);
     histories.forEach((entityHistory, index) => {
       if (!entityHistory || entityHistory.length === 0) return;
-      // `entity_id` may be absent when HA omits it from minimal responses;
-      // search all states in the array first (more robust), then fall back to
-      // matching by position in the filter_entity_id list.
       const entityId =
         entityHistory.find((s) => s.entity_id)?.entity_id ??
         entityConfigs[index]?.entity;
@@ -739,14 +859,10 @@ class HistoryMapCard extends HTMLElement {
       const color = this._getEntityColor(entityId);
 
       const coords: L.LatLng[] = [];
-
       entityHistory.forEach((state) => {
         const lat = state.attributes?.latitude;
         const lng = state.attributes?.longitude;
         if (lat == null || lng == null) return;
-
-        const ts = new Date(state.last_updated ?? state.last_changed).getTime();
-        allPoints.push({ timestamp: ts, entityId, lat, lng });
         coords.push(L.latLng(lat, lng));
       });
 
@@ -761,16 +877,19 @@ class HistoryMapCard extends HTMLElement {
       }
     });
 
+    // Pure data transformation delegated to utils
+    const allPoints = extractTimelinePoints(data, entityConfigs);
     if (allPoints.length === 0) return;
 
-    // Sort all points by time
-    allPoints.sort((a, b) => a.timestamp - b.timestamp);
     this._timelinePoints = allPoints;
 
     // Fit bounds to history
     const latLngs = allPoints.map((p) => L.latLng(p.lat, p.lng));
     this._bounds = L.latLngBounds(latLngs);
-    this._map.fitBounds(this._bounds as L.LatLngBounds, { padding: [40, 40] });
+    this._map.fitBounds(this._bounds as L.LatLngBounds, {
+      padding: [40, 40],
+      maxZoom: this._getDefaultZoom(),
+    });
 
     // Setup slider
     this._setupSlider(startTime, new Date());
@@ -943,7 +1062,7 @@ class HistoryMapCard extends HTMLElement {
         (e) => e.entity === entityId
       );
       const marker = L.marker(lastCoord, {
-        icon: createDotIcon(color, 16),
+        icon: createDotIcon(color, 6, 0.5),
         zIndexOffset: 900,
       })
         .bindTooltip(ec?.name ?? entityId, {
@@ -1006,22 +1125,516 @@ class HistoryMapCard extends HTMLElement {
 }
 
 /* ------------------------------------------------------------------
+ * Visual configuration editor element
+ * ------------------------------------------------------------------ */
+
+const EDITOR_CSS = `
+  :host {
+    display: block;
+  }
+  .editor-root {
+    padding: 16px;
+  }
+  .section-title {
+    font-size: 0.85em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--secondary-text-color, #727272);
+    margin: 16px 0 8px;
+  }
+  .section-title:first-child {
+    margin-top: 0;
+  }
+  .form-row {
+    margin-bottom: 12px;
+  }
+  .form-row ha-textfield {
+    width: 100%;
+    display: block;
+  }
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--divider-color, #e0e0e0);
+  }
+  .switch-row:last-child {
+    border-bottom: none;
+  }
+  .switch-label {
+    font-size: 0.95em;
+    color: var(--primary-text-color, #212121);
+  }
+  .entity-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 8px;
+    border: 1px solid var(--divider-color, #e0e0e0);
+    border-radius: 6px;
+    background: var(--secondary-background-color, #f5f5f5);
+  }
+  .entity-row ha-entity-picker,
+  .entity-row ha-selector {
+    min-width: 0;
+    display: block;
+    align-self: flex-end;
+  }
+  .entity-name-input {
+    width: 110px;
+    align-self: flex-end;
+  }
+  .color-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .color-input-wrap label {
+    font-size: 0.75em;
+    color: var(--secondary-text-color, #727272);
+    white-space: nowrap;
+  }
+  input[type="color"] {
+    width: 32px;
+    height: 32px;
+    padding: 2px;
+    border: 1px solid var(--divider-color, #ccc);
+    border-radius: 4px;
+    cursor: pointer;
+    background: none;
+  }
+  .remove-btn {
+    background: none;
+    border: none;
+    color: var(--error-color, #db4437);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+  }
+  .remove-btn:hover {
+    opacity: 1;
+    background: var(--error-color, #db4437);
+    color: #fff;
+  }
+  .add-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 1px dashed var(--primary-color, #03a9f4);
+    border-radius: 6px;
+    background: none;
+    color: var(--primary-color, #03a9f4);
+    cursor: pointer;
+    font-size: 0.9em;
+    width: 100%;
+    justify-content: center;
+    transition: background 0.15s;
+  }
+  .add-btn:hover {
+    background: var(--primary-color-light, rgba(3,169,244,0.08));
+  }
+`;
+
+class HistoryMapCardEditor extends HTMLElement {
+  private _config: HistoryMapCardConfig | null = null;
+  private _hass: HomeAssistant | null = null;
+  private _shadow: ShadowRoot;
+  // Prevent duplicate load chains from connectedCallback + setConfig racing.
+  private _pickerLoading = false;
+  // Cache the availability result once true so we don't probe on every call.
+  private _pickerAvailable = false;
+
+  private static readonly PICKER_LOAD_TIMEOUT_MS = 5000;
+  private static readonly PICKER_POLL_INTERVAL_MS = 100;
+
+  constructor() {
+    super();
+    this._shadow = this.attachShadow({ mode: 'open' });
+  }
+
+  // Returns true if an element can be created as an upgraded custom element.
+  // We intentionally check constructor.name to avoid iframe-realm identity
+  // issues (probe.constructor !== HTMLElement can be misleading cross-frame).
+  private _isElementAvailable(tag: string): boolean {
+    if (customElements.get(tag)) return true;
+    const probe = document.createElement(tag);
+    return probe.constructor.name !== 'HTMLElement';
+  }
+
+  private _isPickerAvailable(): boolean {
+    if (this._pickerAvailable) return true;
+    const available =
+      this._isElementAvailable('ha-entity-picker') ||
+      this._isElementAvailable('ha-selector');
+    if (available) this._pickerAvailable = true;
+    return available;
+  }
+
+  private _canUseHaEntityPicker(): boolean {
+    return this._isElementAvailable('ha-entity-picker');
+  }
+
+  private _getThemeMode(config: HistoryMapCardConfig): 'auto' | 'light' | 'dark' {
+    if (config.theme_mode === 'auto' || config.theme_mode === 'light' || config.theme_mode === 'dark') {
+      return config.theme_mode;
+    }
+    if (config.dark_mode === true) return 'dark';
+    if (config.dark_mode === false) return 'light';
+    return 'auto';
+  }
+
+  private _toLegacyDarkMode(themeMode: 'auto' | 'light' | 'dark'): boolean | undefined {
+    if (themeMode === 'dark') return true;
+    if (themeMode === 'light') return false;
+    return undefined;
+  }
+
+  connectedCallback(): void {
+    this._ensurePickerLoaded();
+  }
+
+  set hass(hass: HomeAssistant) {
+    this._hass = hass;
+    // Push updated hass to each entity picker without a full re-render.
+    // A full re-render on every hass tick (≈1 s) would destroy open pickers
+    // and cause aria-labelledby churn from freshly-created element IDs.
+    const pickers = this._shadow.querySelectorAll(
+      'ha-entity-picker, ha-selector'
+    );
+    pickers.forEach((el) => {
+      (el as HTMLElement & { hass: HomeAssistant }).hass = hass;
+    });
+  }
+
+  setConfig(config: HistoryMapCardConfig): void {
+    this._config = { ...config };
+    // Start the async load chain first; it will call _render() once the
+    // picker is ready (or after the timeout).  Also call _render() immediately
+    // so the editor shows up even before the picker is confirmed available.
+    this._ensurePickerLoaded();
+    this._render();
+  }
+
+  // ha-entity-picker is lazy-loaded by HA.  Some HA builds register it in a
+  // SCOPED custom element registry rather than the global one, which means
+  // customElements.get() returns undefined and customElements.whenDefined()
+  // never fires even though the element eventually becomes creatable.  We
+  // therefore poll for the element constructor to change from "HTMLElement"
+  // to a real custom-element class after loadCardHelpers() is called.
+  // Polling is more reliable than whenDefined which silently hangs forever
+  // when the element is in a scoped registry.
+  private _ensurePickerLoaded(): void {
+    if (this._isPickerAvailable()) {
+      this._render();
+      return;
+    }
+    if (this._pickerLoading) {
+      return;
+    }
+    this._pickerLoading = true;
+    const loadHelpers = (window as unknown as Record<string, unknown>)['loadCardHelpers'] as (() => Promise<unknown>) | undefined;
+    (loadHelpers ? loadHelpers() : Promise.resolve())
+      .then(() => {
+        const availableNow = this._isPickerAvailable();
+        if (availableNow) return Promise.resolve();
+        // Poll every PICKER_POLL_INTERVAL_MS until the element is available or
+        // the deadline passes.  This handles both global-registry registration
+        // (customElements.get becomes non-null) and scoped-registry cases
+        // (probe constructor name changes from "HTMLElement").
+        return new Promise<void>((resolve) => {
+          const deadline = Date.now() + HistoryMapCardEditor.PICKER_LOAD_TIMEOUT_MS;
+          const poll = () => {
+            // Check the cheap deadline guard first to avoid calling
+            // _isPickerAvailable unnecessarily after the timeout elapses.
+            if (Date.now() >= deadline || this._isPickerAvailable()) {
+              resolve();
+            } else {
+              setTimeout(poll, HistoryMapCardEditor.PICKER_POLL_INTERVAL_MS);
+            }
+          };
+          // Start the first poll immediately — no initial delay — so that if
+          // the element registered synchronously during loadCardHelpers we
+          // pick it up in the same microtask tick.
+          poll();
+        });
+      })
+      .then(() => {
+        this._pickerLoading = false;
+        this._render();
+      })
+      .catch((err) => {
+        console.warn('history-map-card-editor: picker bootstrap failed', err);
+        this._pickerLoading = false;
+      });
+  }
+
+  /* ----------------------------------------------------------------
+   * Full re-render
+   * -------------------------------------------------------------- */
+
+  private _render(): void {
+    if (!this._config) return;
+
+    const config = this._config;
+    const entities: EntityConfig[] = (config.entities ?? []).map((e) =>
+      typeof e === 'string' ? { entity: e } : { ...e }
+    );
+
+    const style = document.createElement('style');
+    style.textContent = EDITOR_CSS;
+
+    const root = document.createElement('div');
+    root.className = 'editor-root';
+
+    // Title field
+    const titleRow = document.createElement('div');
+    titleRow.className = 'form-row';
+    const titleField = document.createElement('ha-textfield');
+    titleField.setAttribute('label', 'Title');
+    titleField.setAttribute('value', config.title ?? '');
+    titleField.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      this._updateConfig({ title: val || undefined });
+    });
+    titleRow.appendChild(titleField);
+    root.appendChild(titleRow);
+
+    // Hours to show
+    const hoursRow = document.createElement('div');
+    hoursRow.className = 'form-row';
+    const hoursField = document.createElement('ha-textfield');
+    hoursField.setAttribute('label', 'History hours to show');
+    hoursField.setAttribute('type', 'number');
+    hoursField.setAttribute('min', '1');
+    hoursField.setAttribute('max', '720');
+    hoursField.setAttribute('value', String(config.hours_to_show ?? 24));
+    hoursField.addEventListener('change', (e: Event) => {
+      const val = parseInt((e.target as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val > 0) this._updateConfig({ hours_to_show: val });
+    });
+    hoursRow.appendChild(hoursField);
+    root.appendChild(hoursRow);
+
+    // Default zoom
+    const zoomRow = document.createElement('div');
+    zoomRow.className = 'form-row';
+    const zoomField = document.createElement('ha-textfield');
+    zoomField.setAttribute('label', 'Default zoom level');
+    zoomField.setAttribute('type', 'number');
+    zoomField.setAttribute('min', '1');
+    zoomField.setAttribute('max', '20');
+    zoomField.setAttribute('value', String(config.default_zoom ?? 14));
+    zoomField.addEventListener('change', (e: Event) => {
+      const val = parseInt((e.target as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val >= 1 && val <= 20)
+        this._updateConfig({ default_zoom: val });
+    });
+    zoomRow.appendChild(zoomField);
+    root.appendChild(zoomRow);
+
+    // Theme mode selector (similar UX to HA Map card)
+    const themeRow = document.createElement('div');
+    themeRow.className = 'form-row';
+    const themeSelector = document.createElement('ha-selector') as HTMLElement & {
+      hass?: HomeAssistant;
+      value?: string;
+      label?: string;
+      selector?: {
+        select: {
+          mode: 'dropdown';
+          options: Array<{ value: string; label: string }>;
+        };
+      };
+    };
+    themeSelector.label = 'Theme mode';
+    themeSelector.selector = {
+      select: {
+        mode: 'dropdown',
+        options: [
+          { value: 'auto', label: 'Auto' },
+          { value: 'light', label: 'Light' },
+          { value: 'dark', label: 'Dark' },
+        ],
+      },
+    };
+    themeSelector.value = this._getThemeMode(config);
+    if (this._hass) themeSelector.hass = this._hass;
+    themeSelector.addEventListener('value-changed', (e: Event) => {
+      const value = (e as CustomEvent<{ value: string }>).detail.value;
+      const themeMode: 'auto' | 'light' | 'dark' =
+        value === 'dark' ? 'dark' : value === 'light' ? 'light' : 'auto';
+      this._updateConfig({
+        theme_mode: themeMode,
+        dark_mode: this._toLegacyDarkMode(themeMode),
+      });
+    });
+    themeRow.appendChild(themeSelector);
+    root.appendChild(themeRow);
+
+    /* ---- Entities section ---- */
+    const entTitle = document.createElement('div');
+    entTitle.className = 'section-title';
+    entTitle.textContent = 'Entities';
+    root.appendChild(entTitle);
+
+    entities.forEach((ec, idx) => {
+      const row = this._buildEntityRow(ec, idx, entities);
+      root.appendChild(row);
+    });
+
+    // Add entity button
+    const addBtn = document.createElement('button');
+    addBtn.className = 'add-btn';
+    addBtn.innerHTML =
+      `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>` +
+      `<span>Add entity</span>`;
+    addBtn.addEventListener('click', () => {
+      const newEntities = [...entities, { entity: '' }];
+      this._updateConfig({ entities: newEntities });
+    });
+    root.appendChild(addBtn);
+
+    this._shadow.innerHTML = '';
+    this._shadow.appendChild(style);
+    this._shadow.appendChild(root);
+  }
+
+  private _buildEntityRow(
+    ec: EntityConfig,
+    idx: number,
+    allEntities: EntityConfig[]
+  ): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'entity-row';
+
+    // Prefer ha-entity-picker when available; fallback to ha-selector entity
+    // selector, which is often available earlier in HA startup.
+    const picker = this._canUseHaEntityPicker()
+      ? (document.createElement('ha-entity-picker') as HTMLElement & {
+          hass?: HomeAssistant;
+          value?: string;
+          label?: string;
+          includeDomains?: string[];
+        })
+      : (document.createElement('ha-selector') as HTMLElement & {
+          hass?: HomeAssistant;
+          value?: string;
+          label?: string;
+          selector?: {
+            entity: {
+              domain: string[];
+            };
+          };
+        });
+//    picker.label = 'Entity';
+    picker.value = ec.entity ?? '';
+    if ('includeDomains' in picker) {
+      picker.includeDomains = ['device_tracker', 'person'];
+    }
+    if ('selector' in picker) {
+      picker.selector = { entity: { domain: ['device_tracker', 'person'] } };
+    }
+    if (this._hass) picker.hass = this._hass;
+    picker.addEventListener('value-changed', (e: Event) => {
+      const newVal = (e as CustomEvent<{ value: string }>).detail.value;
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], entity: newVal };
+      this._updateConfig({ entities: updated });
+    });
+    row.appendChild(picker);
+
+    // Name input
+    const nameField = document.createElement('ha-textfield');
+    nameField.className = 'entity-name-input';
+    nameField.setAttribute('label', 'Name');
+    nameField.setAttribute('value', ec.name ?? '');
+    nameField.setAttribute('placeholder', 'Optional');
+    nameField.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], name: val || undefined };
+      this._updateConfig({ entities: updated });
+    });
+    row.appendChild(nameField);
+
+    // Color picker
+    const colorWrap = document.createElement('div');
+    colorWrap.className = 'color-input-wrap';
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.value = ec.color ?? ENTITY_COLORS[idx % ENTITY_COLORS.length];
+    colorInput.title = 'Entity color';
+    colorInput.addEventListener('change', (e: Event) => {
+      const val = (e.target as HTMLInputElement).value;
+      const updated = [...allEntities];
+      updated[idx] = { ...updated[idx], color: val };
+      this._updateConfig({ entities: updated });
+    });
+    colorWrap.appendChild(colorInput);
+    row.appendChild(colorWrap);
+
+    // Remove button
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-btn';
+    removeBtn.title = 'Remove entity';
+    removeBtn.innerHTML =
+      `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">` +
+      `<path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>` +
+      `</svg>`;
+    removeBtn.addEventListener('click', () => {
+      if (allEntities.length <= 1) return; // keep at least one
+      const updated = allEntities.filter((_, i) => i !== idx);
+      this._updateConfig({ entities: updated });
+    });
+    row.appendChild(removeBtn);
+
+    return row;
+  }
+
+  /* ----------------------------------------------------------------
+   * Config helpers
+   * -------------------------------------------------------------- */
+
+  private _updateConfig(patch: Partial<HistoryMapCardConfig>): void {
+    if (!this._config) return;
+    this._config = { ...this._config, ...patch };
+    this.dispatchEvent(
+      new CustomEvent('config-changed', {
+        detail: { config: this._config },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    // Re-render to reflect updated state (entity list changes, etc.)
+    this._render();
+  }
+}
+
+/* ------------------------------------------------------------------
  * Register the custom element
  * ------------------------------------------------------------------ */
 
+// Announce to HA's custom card picker before registering elements
+// so HA can resolve the card name immediately on element definition.
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: 'history-map-card',
+  name: 'History Map Card',
+  description: 'Map card with history timeline and animation playback',
+  preview: false,
+});
+
+customElements.define('history-map-card-editor', HistoryMapCardEditor);
 customElements.define('history-map-card', HistoryMapCard);
 
-// Announce to HA's custom card picker
-(window as Window & { customCards?: Array<Record<string, unknown>> })
-  .customCards = (
-    (window as Window & { customCards?: Array<Record<string, unknown>> })
-      .customCards ?? []
-  ).concat([
-    {
-      type: 'history-map-card',
-      name: 'History Map Card',
-      description:
-        'Map card with history timeline and animation playback',
-      preview: false,
-    },
-  ]);
+export { HistoryMapCard };
