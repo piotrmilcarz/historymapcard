@@ -1,5 +1,6 @@
 {
   "name": "History Map Card",
+  "description": "Home Assistant custom Lovelace card: Map with a history timeline and animated playback",
   "render_readme": true,
   "filename": "history-map-card.js"
 }
