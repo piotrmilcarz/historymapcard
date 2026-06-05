@@ -320,6 +320,7 @@ class HistoryMapCard extends HTMLElement {
   private _map: L.Map | null = null;
   private _shadow: ShadowRoot;
   private _mapContainer: HTMLDivElement | null = null;
+  private _data: HistoryState[][] = [];
 
   // Per-entity display layers
   private _currentMarkers: Map<string, L.Marker> = new Map();
@@ -338,9 +339,11 @@ class HistoryMapCard extends HTMLElement {
   private _playBtn: HTMLButtonElement | null = null;
   private _timeLabelEl: HTMLSpanElement | null = null;
   private _loadingEl: HTMLElement | null = null;
+  private _legend: HTMLDivElement | null = null;
 
   // Entity colour map
   private _entityColors: Map<string, string> = new Map();
+  private _hiddenEntities: Map<string, boolean> = new Map();
 
   private _initialViewSet = false;
   private _historyFetchedAt = 0;
@@ -533,21 +536,10 @@ class HistoryMapCard extends HTMLElement {
     card.appendChild(loading);
 
     // Legend
-    const legend = document.createElement('div');
-    legend.className = 'legend';
-    this._getEntityConfigs().forEach((ec) => {
-      const item = document.createElement('div');
-      item.className = 'legend-item';
-      const dot = document.createElement('div');
-      dot.className = 'legend-dot';
-      dot.style.background = this._getEntityColor(ec.entity);
-      const label = document.createElement('span');
-      label.textContent = ec.name ?? ec.entity;
-      item.appendChild(dot);
-      item.appendChild(label);
-      legend.appendChild(item);
-    });
-    card.appendChild(legend);
+    this._legend = document.createElement('div');
+    this._legend.className = 'legend';
+    this._buildLegend()
+    card.appendChild(this._legend);
 
     // Timeline
     const timelineContainer = document.createElement('div');
@@ -609,6 +601,33 @@ class HistoryMapCard extends HTMLElement {
     this._shadow.innerHTML = '';
     this._shadow.appendChild(style);
     this._shadow.appendChild(card);
+  }
+
+  private _buildLegend(): void {
+    if (!this._legend) return
+    const legend = this._legend;
+    legend.innerHTML = '';
+    console.table(document.getElementsByClassName("legend"))
+    this._getEntityConfigs().forEach((ec) => {
+      const item = document.createElement('div');
+      item.className = 'legend-item';
+      item.onclick = () => {
+        this._hiddenEntities.set(ec.entity, !this._hiddenEntities.get(ec.entity));
+        this._buildLegend();
+        const startTime = this._getStartTime();
+        if (!startTime) return;
+        this._processHistoryData(this._data, startTime);
+      }
+      item.style.cursor = "pointer";
+      const dot = document.createElement('div');
+      dot.className = 'legend-dot';
+      dot.style.background = this._getEntityColor(ec.entity);
+      const label = document.createElement('span');
+      label.textContent = ec.name ?? ec.entity;
+      item.appendChild(dot);
+      item.appendChild(label);
+      legend.appendChild(item);
+    });
   }
 
   /* ----------------------------------------------------------------
@@ -712,11 +731,19 @@ class HistoryMapCard extends HTMLElement {
         ec.entity,
         ec.color ?? ENTITY_COLORS[i % ENTITY_COLORS.length]
       );
+      this._hiddenEntities.set(
+        ec.entity,
+        false
+      )
     });
   }
 
   private _getEntityColor(entityId: string): string {
-    return this._entityColors.get(entityId) ?? ENTITY_COLORS[0];
+    const color = this._entityColors.get(entityId) ?? ENTITY_COLORS[0];
+    if (this._hiddenEntities.get(entityId))
+      return "#fff3"
+    else
+      return color
   }
 
   private _getDefaultZoom(): number {
@@ -795,14 +822,13 @@ class HistoryMapCard extends HTMLElement {
 
     if (this._loadingEl) this._loadingEl.style.display = '';
 
-    const hoursToShow = this._config.hours_to_show ?? 24;
-    const startTime = new Date(Date.now() - hoursToShow * 3600 * 1000);
+    const startTime = this._getStartTime()
     const entityIds = this._getEntityConfigs()
       .map((e) => e.entity)
       .filter((id) => id.length > 0)
       .join(',');
 
-    if (!entityIds) return;
+    if (!entityIds || !startTime) return;
 
     try {
       // NOTE: HA's history API checks `minimal_response` and `no_attributes`
@@ -825,11 +851,11 @@ class HistoryMapCard extends HTMLElement {
         `?filter_entity_id=${entityIds}` +
         `&significant_changes_only=0`;
 
-      const data: HistoryState[][] = await this._hass.callApi('GET', path);
+      this._data = await this._hass.callApi('GET', path);
 
       if (this._loadingEl) this._loadingEl.style.display = 'none';
 
-      this._processHistoryData(data, startTime);
+      this._processHistoryData(this._data, startTime);
     } catch (err) {
       console.warn('history-map-card: failed to fetch history', err);
       if (this._loadingEl) this._loadingEl.style.display = 'none';
@@ -893,6 +919,12 @@ class HistoryMapCard extends HTMLElement {
 
     // Setup slider
     this._setupSlider(startTime, new Date());
+  }
+
+  private _getStartTime() {
+    if (!this._config) return null;
+    const hoursToShow = this._config.hours_to_show ?? 24;
+    return new Date(Date.now() - hoursToShow * 3600 * 1000);
   }
 
   /* ----------------------------------------------------------------

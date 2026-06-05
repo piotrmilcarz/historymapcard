@@ -14923,6 +14923,7 @@ class HistoryMapCard extends HTMLElement {
         this._hass = null;
         this._map = null;
         this._mapContainer = null;
+        this._data = [];
         // Per-entity display layers
         this._currentMarkers = new Map();
         this._historyPathLines = new Map();
@@ -14938,8 +14939,10 @@ class HistoryMapCard extends HTMLElement {
         this._playBtn = null;
         this._timeLabelEl = null;
         this._loadingEl = null;
+        this._legend = null;
         // Entity colour map
         this._entityColors = new Map();
+        this._hiddenEntities = new Map();
         this._initialViewSet = false;
         this._historyFetchedAt = 0;
         this._bounds = null;
@@ -15102,22 +15105,10 @@ class HistoryMapCard extends HTMLElement {
         this._loadingEl = loading;
         card.appendChild(loading);
         // Legend
-        const legend = document.createElement('div');
-        legend.className = 'legend';
-        this._getEntityConfigs().forEach((ec) => {
-            var _a;
-            const item = document.createElement('div');
-            item.className = 'legend-item';
-            const dot = document.createElement('div');
-            dot.className = 'legend-dot';
-            dot.style.background = this._getEntityColor(ec.entity);
-            const label = document.createElement('span');
-            label.textContent = (_a = ec.name) !== null && _a !== void 0 ? _a : ec.entity;
-            item.appendChild(dot);
-            item.appendChild(label);
-            legend.appendChild(item);
-        });
-        card.appendChild(legend);
+        this._legend = document.createElement('div');
+        this._legend.className = 'legend';
+        this._buildLegend();
+        card.appendChild(this._legend);
         // Timeline
         const timelineContainer = document.createElement('div');
         timelineContainer.className = 'timeline-container';
@@ -15168,6 +15159,35 @@ class HistoryMapCard extends HTMLElement {
         this._shadow.innerHTML = '';
         this._shadow.appendChild(style);
         this._shadow.appendChild(card);
+    }
+    _buildLegend() {
+        if (!this._legend)
+            return;
+        const legend = this._legend;
+        legend.innerHTML = '';
+        console.table(document.getElementsByClassName("legend"));
+        this._getEntityConfigs().forEach((ec) => {
+            var _a;
+            const item = document.createElement('div');
+            item.className = 'legend-item';
+            item.onclick = () => {
+                this._hiddenEntities.set(ec.entity, !this._hiddenEntities.get(ec.entity));
+                this._buildLegend();
+                const startTime = this._getStartTime();
+                if (!startTime)
+                    return;
+                this._processHistoryData(this._data, startTime);
+            };
+            item.style.cursor = "pointer";
+            const dot = document.createElement('div');
+            dot.className = 'legend-dot';
+            dot.style.background = this._getEntityColor(ec.entity);
+            const label = document.createElement('span');
+            label.textContent = (_a = ec.name) !== null && _a !== void 0 ? _a : ec.entity;
+            item.appendChild(dot);
+            item.appendChild(label);
+            legend.appendChild(item);
+        });
     }
     /* ----------------------------------------------------------------
      * Map initialisation
@@ -15260,11 +15280,16 @@ class HistoryMapCard extends HTMLElement {
         this._getEntityConfigs().forEach((ec, i) => {
             var _a;
             this._entityColors.set(ec.entity, (_a = ec.color) !== null && _a !== void 0 ? _a : ENTITY_COLORS[i % ENTITY_COLORS.length]);
+            this._hiddenEntities.set(ec.entity, false);
         });
     }
     _getEntityColor(entityId) {
         var _a;
-        return (_a = this._entityColors.get(entityId)) !== null && _a !== void 0 ? _a : ENTITY_COLORS[0];
+        const color = (_a = this._entityColors.get(entityId)) !== null && _a !== void 0 ? _a : ENTITY_COLORS[0];
+        if (this._hiddenEntities.get(entityId))
+            return "#fff3";
+        else
+            return color;
     }
     _getDefaultZoom() {
         var _a;
@@ -15334,18 +15359,16 @@ class HistoryMapCard extends HTMLElement {
      * History fetching
      * -------------------------------------------------------------- */
     async _fetchHistory() {
-        var _a;
         if (!this._hass || !this._config)
             return;
         if (this._loadingEl)
             this._loadingEl.style.display = '';
-        const hoursToShow = (_a = this._config.hours_to_show) !== null && _a !== void 0 ? _a : 24;
-        const startTime = new Date(Date.now() - hoursToShow * 3600 * 1000);
+        const startTime = this._getStartTime();
         const entityIds = this._getEntityConfigs()
             .map((e) => e.entity)
             .filter((id) => id.length > 0)
             .join(',');
-        if (!entityIds)
+        if (!entityIds || !startTime)
             return;
         try {
             // NOTE: HA's history API checks `minimal_response` and `no_attributes`
@@ -15366,10 +15389,10 @@ class HistoryMapCard extends HTMLElement {
             const path = `history/period/${startTime.toISOString()}` +
                 `?filter_entity_id=${entityIds}` +
                 `&significant_changes_only=0`;
-            const data = await this._hass.callApi('GET', path);
+            this._data = await this._hass.callApi('GET', path);
             if (this._loadingEl)
                 this._loadingEl.style.display = 'none';
-            this._processHistoryData(data, startTime);
+            this._processHistoryData(this._data, startTime);
         }
         catch (err) {
             console.warn('history-map-card: failed to fetch history', err);
@@ -15427,6 +15450,13 @@ class HistoryMapCard extends HTMLElement {
         });
         // Setup slider
         this._setupSlider(startTime, new Date());
+    }
+    _getStartTime() {
+        var _a;
+        if (!this._config)
+            return null;
+        const hoursToShow = (_a = this._config.hours_to_show) !== null && _a !== void 0 ? _a : 24;
+        return new Date(Date.now() - hoursToShow * 3600 * 1000);
     }
     /* ----------------------------------------------------------------
      * Timeline / slider setup
