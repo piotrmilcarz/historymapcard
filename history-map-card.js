@@ -14641,8 +14641,8 @@ function extractTimelinePoints(data, entityConfigs) {
     points.sort((a, b) => a.timestamp - b.timestamp);
     return points;
 }
-
-const TILE_URL = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+/* UPDATE with API KEY */
+const TILE_URL = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=cb1_4ec4_1_acb8678cdb67799763ce1fc8';
 const TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>';
 /* ------------------------------------------------------------------
  * Leaflet CSS — injected once into the document head
