@@ -23,17 +23,48 @@ import { test, expect, Page } from '@playwright/test';
 
 const FIXTURE_URL = 'http://127.0.0.1:3737/test-fixtures/marathon-map.html';
 
+/** "Now" for the card: 6 h window (hours_to_show) ending 15:00 UTC, race starts 09:00 UTC */
+const FIXED_NOW = new Date('2025-04-27T15:00:00Z');
+
+// Timeline labels are formatted with the browser locale / timezone – pin both
+test.use({ locale: 'en-GB', timezoneId: 'Europe/London' });
+
+/** Deterministic 256×256 stand-in for an OSM raster tile (light map colour + grid line) */
+const STUB_TILE_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">' +
+  '<rect width="256" height="256" fill="#f2efe9"/>' +
+  '<path d="M0 0H256M0 0V256" stroke="#d9d4c9" stroke-width="1" fill="none"/>' +
+  '</svg>';
+
 // ── Page setup helper ────────────────────────────────────────────────────────
 
 /**
- * Open the fixture, allow CartoCDN tile requests so the real London map is
- * visible in screenshots, then wait until:
+ * Open the fixture (OSM tile requests are stubbed, see below), then wait until:
  *  1. The fixture script has finished (`window.__cardReady`)
  *  2. The Leaflet container is painted inside the component's shadow DOM
  *  3. The timeline slider has received track-points from the mocked history
  *  4. The network has gone idle (tiles loaded / timed-out)
  */
 async function setupPage(page: Page): Promise<void> {
+  // The card derives its time window (and the timeline labels) from
+  // `Date.now()`. Pin the clock to the end of the race so the screenshot does
+  // not change from day to day. The clock must keep ticking (setSystemTime,
+  // not setFixedTime): Leaflet's tile fade-in is driven by Date.now(), so a
+  // frozen clock leaves every tile transparent.
+  await page.clock.setSystemTime(FIXED_NOW);
+
+  // The fixture has no `map_tiles` proxy, so the card falls back to direct
+  // OSM raster tiles. Serve a fixed stub tile instead of hitting the network,
+  // so screenshots do not depend on tile.openstreetmap.org (rate limits,
+  // CDN changes, runner connectivity).
+  await page.route('https://tile.openstreetmap.org/**', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'image/svg+xml',
+      body: STUB_TILE_SVG,
+    })
+  );
+
   await page.goto(FIXTURE_URL);
 
   // Component script finished wiring hass
@@ -159,7 +190,7 @@ test.describe('HistoryMapCard – London Marathon integration', () => {
   /**
    * Pixel-accurate snapshot of the full HistoryMapCard component.
    *
-   * Shows: Leaflet map with London Marathon 2025 route (light-blue tile background),
+   * Shows: Leaflet map with London Marathon 2025 route (stubbed tile background),
    *        marathon route polyline + live marker at The Mall finish,
    *        legend ("Runner"), timeline bar with play button and slider.
    *
