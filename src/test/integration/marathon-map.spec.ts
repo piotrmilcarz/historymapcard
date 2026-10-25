@@ -140,6 +140,14 @@ test.describe('HistoryMapCard – London Marathon integration', () => {
     expect(totalSvgLength).toBeGreaterThan(500);
   });
 
+  test('attribution matches HA (OpenStreetMap, no "Leaflet" prefix)', async ({ page }) => {
+    await setupPage(page);
+    const attribution = page.locator('.leaflet-control-attribution');
+    await expect(attribution).toContainText('OpenStreetMap contributors');
+    await expect(attribution).not.toContainText('Leaflet');
+    await expect(attribution).not.toContainText('CARTO');
+  });
+
   test('zoom controls are present', async ({ page }) => {
     await setupPage(page);
     await expect(page.locator('.leaflet-control-zoom-in')).toBeVisible();

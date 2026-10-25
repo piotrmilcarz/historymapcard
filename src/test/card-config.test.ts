@@ -25,6 +25,7 @@ vi.mock('leaflet', () => ({
       remove: vi.fn(),
     })),
     divIcon: vi.fn(() => ({})),
+    Browser: { retina: false },
     latLng: vi.fn((lat: number, lng: number) => ({ lat, lng })),
     latLngBounds: vi.fn(() => ({})),
     polyline: vi.fn(() => ({
