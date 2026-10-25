@@ -1,6 +1,6 @@
 {
   "name": "historymapcard",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Home Assistant custom Lovelace card: Map with history timeline animation",
   "main": "history-map-card.js",
   "scripts": {
