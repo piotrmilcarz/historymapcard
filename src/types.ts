@@ -23,6 +23,8 @@ export interface HomeAssistant {
     path: string,
     parameters?: Record<string, unknown>
   ) => Promise<T>;
+  /** WebSocket command helper (used for the map_tiles access token) */
+  callWS?: <T>(msg: Record<string, unknown>) => Promise<T>;
 }
 
 export interface EntityConfig {

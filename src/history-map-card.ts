@@ -16,6 +16,12 @@ import {
   normalizeHistories,
   extractTimelinePoints,
 } from './utils.js';
+import {
+  createBaseLayer,
+  MAP_MAX_ZOOM,
+  MAP_MIN_ZOOM,
+  type MapBaseLayer,
+} from './base-layer.js';
 
 /* ------------------------------------------------------------------
  * Window augmentation for HA custom card registration
@@ -27,10 +33,6 @@ declare global {
   }
 }
 
-const TILE_URL =
-  'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
-const TILE_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
 /* ------------------------------------------------------------------
  * Leaflet CSS — injected once into the document head
@@ -267,15 +269,32 @@ const CARD_CSS = `
   .leaflet-container img.leaflet-tile {
     mix-blend-mode: normal !important;
   }
-  /* Dark mode — identical to HA map component */
+  /* Dark mode — identical to the HA map component (ha-map). The vector map
+     ships its own dark style; only raster fallback tiles are inverted. */
   #map.dark {
-    background: #090909;
+    background: #191b2c;
+    --map-filter: invert(0.9) hue-rotate(170deg) brightness(1.5) contrast(1.2) saturate(0.3);
   }
-  .leaflet-tile-pane {
+  .leaflet-tile-pane .leaflet-tile {
     filter: var(--map-filter, invert(0));
   }
-  #map.dark {
-    --map-filter: invert(0.9) hue-rotate(170deg) brightness(1.5) contrast(1.2) saturate(0.3);
+  /* MapLibre canvas rendered through the Leaflet adapter */
+  .leaflet-gl-layer .maplibregl-canvas,
+  .maplibregl-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  .maplibregl-map {
+    position: relative;
+    overflow: hidden;
+  }
+  #map.dark .leaflet-control-attribution {
+    background: rgba(28, 28, 28, 0.6);
+    color: #ffffff;
+  }
+  #map.dark .leaflet-control-attribution a {
+    color: rgba(255, 255, 255, 0.85);
   }
   #map.dark .leaflet-bar a {
     background-color: #1c1c1c;
@@ -318,6 +337,7 @@ class HistoryMapCard extends HTMLElement {
   private _config: HistoryMapCardConfig | null = null;
   private _hass: HomeAssistant | null = null;
   private _map: L.Map | null = null;
+  private _baseLayer: MapBaseLayer | null = null;
   private _shadow: ShadowRoot;
   private _mapContainer: HTMLDivElement | null = null;
 
@@ -419,6 +439,7 @@ class HistoryMapCard extends HTMLElement {
     if (this._map) {
       this._map.remove();
       this._map = null;
+      this._baseLayer = null;
     }
     if (this._animationTimer !== null) {
       clearTimeout(this._animationTimer);
@@ -489,6 +510,7 @@ class HistoryMapCard extends HTMLElement {
     if (this._map) {
       this._map.remove();
       this._map = null;
+      this._baseLayer = null;
     }
 
     // Stop any running animation and clear stale layer references so the
@@ -620,24 +642,41 @@ class HistoryMapCard extends HTMLElement {
 
     this._initialViewSet = false;
 
-    this._map = L.map(this._mapContainer, {
+    const map = L.map(this._mapContainer, {
       zoomControl: true,
       attributionControl: true,
+      minZoom: MAP_MIN_ZOOM,
+      maxZoom: MAP_MAX_ZOOM,
     });
+    this._map = map;
+    // Like the HA map: attribution only, no "Leaflet" prefix
+    map.attributionControl.setPrefix('');
 
     // Ensure the map is considered loaded before any resize/invalidate
     // sequence runs (e.g. dashboard tab/edit-mode transitions).
-    this._map.setView([0, 0], this._getDefaultZoom());
+    map.setView([0, 0], this._getDefaultZoom());
 
-    // Apply dark class immediately so CSS filter is ready when tiles load
+    // Apply dark class immediately so the raster fallback filter is ready
     this._mapContainer.classList.toggle('dark', isDarkMode(this._config));
 
-    L.tileLayer(TILE_URL, {
-      attribution: TILE_ATTRIBUTION,
-      subdomains: 'abcd',
-      minZoom: 0,
-      maxZoom: 20,
-    }).addTo(this._map);
+    // Base map exactly as the current HA frontend draws it: MapLibre vector
+    // tiles via core's map_tiles proxy (raster / direct OSM as fallbacks).
+    this._baseLayer = null;
+    createBaseLayer(map, {
+      getHass: () => this._hass,
+      dark: isDarkMode(this._config),
+      isActive: () => this._map === map,
+    })
+      .then((baseLayer) => {
+        if (this._map !== map) return;
+        this._baseLayer = baseLayer;
+        this._mapContainer?.setAttribute('data-base-layer', baseLayer.kind);
+        // The theme may have changed while the style was loading
+        if (this._config) baseLayer.setDark(isDarkMode(this._config));
+      })
+      .catch((err) => {
+        console.error('history-map-card: failed to set up base map', err);
+      });
 
     // Observe container size changes so Leaflet redraws when the dashboard
     // switches between edit and view modes (the container may be hidden then
@@ -661,8 +700,10 @@ class HistoryMapCard extends HTMLElement {
 
   private _updateMapTheme(): void {
     if (!this._mapContainer || !this._config) return;
-    // Toggle the dark class — CSS handles the tile filter, no tile reload needed
-    this._mapContainer.classList.toggle('dark', isDarkMode(this._config));
+    const dark = isDarkMode(this._config);
+    // Raster fallback: CSS filter. Vector map: swap to HA's dark style.
+    this._mapContainer.classList.toggle('dark', dark);
+    this._baseLayer?.setDark(dark);
   }
 
   /* ----------------------------------------------------------------

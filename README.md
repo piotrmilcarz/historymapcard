@@ -6,7 +6,8 @@ A **Home Assistant custom Lovelace card** that extends the built-in _Map card_ w
 
 ## Features
 
-- Displays a Leaflet map with the **current positions** of tracked entities – identical to the built-in HA Map card.
+- Displays the **same base map as the built-in HA Map card** (Home Assistant 2026.10+): OpenStreetMap vector tiles rendered with MapLibre GL, served through Home Assistant's `map_tiles` proxy, with HA's own light and dark styles. Raster tiles are used when WebGL2 is unavailable, and on older Home Assistant versions (without `map_tiles`) the card falls back to OpenStreetMap raster tiles loaded directly.
+- Shows the **current positions** of tracked entities.
 - Draws **faded historical paths** (dashed polylines) for the configured time range.
 - **Timeline bar** below the map showing the full history period.
 - **Play / Pause button** – clicking Play animates entity movements across the map in chronological order, drawing markers and solid path lines as time advances.
@@ -115,6 +116,17 @@ npm run dev
 3. The slider's range maps to 0 → N-1 timeline points.
 4. During **playback**, each frame advances the index by one and re-draws the accumulated path and a position marker for each entity. The delay between frames is proportional to the real elapsed time between history samples, scaled so the full animation takes approximately 30 seconds.
 5. The **current real position** (from `hass.states`) is always shown as a larger marker on top.
+
+### Base map
+
+The base map follows the current Home Assistant frontend (`src/common/map/base-layer.ts`):
+
+1. The card asks core for a tile access token over the WebSocket (`map_tiles/access_token`) and refreshes it every 20 minutes (core rotates it every 30).
+2. With WebGL2 it loads HA's style (`/static/map/light.json` or `/static/map/dark.json`) and renders it with MapLibre GL inside Leaflet (`@maplibre/maplibre-gl-leaflet`). Tiles, glyphs and the TileJSON come from `/api/map_tiles/*` and carry the token in the `X-Map-Tiles-Token` header.
+3. Without WebGL2, or after the WebGL context is lost, it uses `/api/map_tiles/raster/{z}/{x}/{y}.png?token=…`.
+4. If the token request fails (Home Assistant older than 2026.10), it loads `https://tile.openstreetmap.org/{z}/{x}/{y}.png` directly.
+
+The MapLibre worker is embedded in `history-map-card.js`, so the card is still a single file (about 1.7 MB, about 480 kB gzipped).
 
 ## License
 
